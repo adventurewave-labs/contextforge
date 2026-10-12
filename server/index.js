@@ -17,7 +17,9 @@ const PORT = process.env.PORT || 3000;
 const MAX_BODY = 8 * 1024 * 1024; // 8MB
 const MAX_CONTEXT_CHARS = 4_000_000; // ~1M tokens
 const RATE_LIMIT_WINDOW_MS = 60_000;
-const RATE_LIMIT_MAX = 40;
+// Tunable per-IP rate limit (requests/min). Default 40; deployments behind
+// auth or internal gateways may raise it. Hard-capped at 10k.
+const RATE_LIMIT_MAX = Math.min(10000, Math.max(1, Number(process.env.RATE_LIMIT_MAX) || 40));
 
 // --- CORS (disabled by default; opt in via CORS_ORIGINS, comma-separated) ---
 const CORS_ORIGINS = (process.env.CORS_ORIGINS || '')
