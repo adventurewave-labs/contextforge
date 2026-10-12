@@ -256,6 +256,30 @@ async function main() {
       assert.strictEqual(res.status, 404);
     });
 
+    console.log('http · adversarial inputs');
+    await ok('verify survives regex-hostile unicode without crashing', async () => {
+      const nasty = '𝕏'.repeat(5000) + '\\d+|[{}]()<>#*_.~^$\\\\' + '\u0000\u0001'.repeat(100) + '🏁';
+      const { res, json } = await req('POST', '/api/verify', { original: nasty, compressed: nasty.slice(0, 100) });
+      assert.strictEqual(res.status, 200);
+      assert.ok(typeof json.score === 'number');
+      assert.ok((json.missing || []).length <= 60);
+    });
+    await ok('compress handles terminator-free megabyte text', async () => {
+      const wall = 'x'.repeat(1_200_000); // no sentence terminators at all
+      const { res, json } = await req('POST', '/api/compress', { context: wall, targetRatio: 0.2 });
+      assert.strictEqual(res.status, 200);
+      assert.ok(json.compressed.length < wall.length * 0.5);
+    });
+    await ok('compress handles all-numbers input', async () => {
+      const nums = Array.from({ length: 5000 }, (_, i) => i).join(' ');
+      const { res } = await req('POST', '/api/compress', { context: nums, targetRatio: 0.3 });
+      assert.strictEqual(res.status, 200);
+    });
+    await ok('server still healthy after fuzzing', async () => {
+      const { json } = await req('GET', '/health');
+      assert.strictEqual(json.ok, true);
+    });
+
     console.log('http · rate limiting (runs last: exhausts the window)');
     await ok('burst beyond limit gets 429 + Retry-After + headers', async () => {
       let got429 = null;

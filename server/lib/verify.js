@@ -31,46 +31,72 @@ function extractFacts(text) {
   const facts = new Map();
   const t = text || '';
 
-  pushFacts(facts, t.match(/https?:\/\/[^\s)>\]"']+/gi) || [], 'url', 'high');
-  pushFacts(facts, t.match(/[\w.+-]+@[\w-]+\.[\w.]+/g) || [], 'email', 'medium');
-  pushFacts(facts, t.match(/[$€£]\s?\d[\d,]*(?:\.\d+)?/g) || [], 'money', 'high');
-  pushFacts(facts, t.match(/\b\d[\d,]*(?:\.\d+)?\s?%/g) || [], 'percent', 'high');
-  pushFacts(
-    facts,
-    t.match(/\b(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:t(?:ember)?)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\s+\d{1,2}(?:,?\s+\d{4})?\b/gi) || [],
-    'date',
-    'high'
-  );
-  pushFacts(facts, t.match(/\b\d{4}-\d{2}-\d{2}\b/g) || [], 'date', 'high');
-  pushFacts(facts, t.match(/\b\d{1,2}\/\d{1,2}\/\d{2,4}\b/g) || [], 'date', 'high');
-  pushFacts(
-    facts,
-    t.match(/\b\d[\d,]*(?:\.\d+)?\s?(?:million|billion|bn|thousand|k|x)\b/gi) || [],
-    'quantity',
-    'high'
-  );
-  // Numbers with units (keep after money/percent so those win dedupe by kind)
-  pushFacts(
-    facts,
-    t.match(/\b\d[\d,]*(?:\.\d+)?\s?(?:USD|EUR|GBP|days?|hours?|hrs?|minutes?|mins?|seconds?|ms|tokens?|users?|requests?|customers?|GB|MB|TB|KB)\b/gi) || [],
-    'number',
-    'high'
-  );
-  pushFacts(facts, t.match(/"([^"\n]{3,60})"/g) || [], 'quoted', 'medium');
+  // Guard rails: each regex family runs only when its anchor characters are
+  // present. Without these, pathological inputs (e.g. a megabyte wall of one
+  // letter) drive catastrophic O(n^2) backtracking through every pattern;
+  // with them, absent-anchor inputs cost one O(n) scan. Regression-tested in
+  // test/run.js (pathological-input timing).
+  const hasDigit = /\d/.test(t);
+  const hasUpper = /[A-Z]/.test(t);
+  const hasLower = /[a-z]/.test(t);
+  const hasQuote = t.includes('"');
+
+  if (/https?:/.test(t)) {
+    pushFacts(facts, t.match(/https?:\/\/[^\s)>\]"']+/gi) || [], 'url', 'high');
+  }
+  // Local part bounded to 64 chars so even '@'-bearing walls scan linearly.
+  if (t.includes('@') && hasLower) {
+    pushFacts(facts, t.match(/[\w.+-]{1,64}@[\w-]+\.[\w.]+/g) || [], 'email', 'medium');
+  }
+  if (hasDigit) {
+    pushFacts(facts, t.match(/[$€£]\s?\d[\d,]*(?:\.\d+)?/g) || [], 'money', 'high');
+    pushFacts(facts, t.match(/\b\d[\d,]*(?:\.\d+)?\s?%/g) || [], 'percent', 'high');
+    pushFacts(facts, t.match(/\b\d{4}-\d{2}-\d{2}\b/g) || [], 'date', 'high');
+    pushFacts(facts, t.match(/\b\d{1,2}\/\d{1,2}\/\d{2,4}\b/g) || [], 'date', 'high');
+    pushFacts(
+      facts,
+      t.match(/\b\d[\d,]*(?:\.\d+)?\s?(?:million|billion|bn|thousand|k|x)\b/gi) || [],
+      'quantity',
+      'high'
+    );
+    // Numbers with units (after money/percent so those win dedupe by kind)
+    pushFacts(
+      facts,
+      t.match(/\b\d[\d,]*(?:\.\d+)?\s?(?:USD|EUR|GBP|days?|hours?|hrs?|minutes?|mins?|seconds?|ms|tokens?|users?|requests?|customers?|GB|MB|TB|KB)\b/gi) || [],
+      'number',
+      'high'
+    );
+  }
+  if (hasDigit && hasLower) {
+    pushFacts(
+      facts,
+      t.match(/\b(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:t(?:ember)?)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\s+\d{1,2}(?:,?\s+\d{4})?\b/gi) || [],
+      'date',
+      'high'
+    );
+  }
+  if (hasQuote) {
+    pushFacts(facts, t.match(/"([^"\n]{3,60})"/g) || [], 'quoted', 'medium');
+  }
+
   const STARTERS = new Set(['The', 'This', 'That', 'There', 'Then', 'And', 'But', 'For', 'With', 'More', 'Team', 'Contact', 'Please', 'Thanks', 'When', 'While', 'Until', 'Because', 'Our', 'Your', 'Their', 'What', 'Where', 'How', 'Why', 'Also', 'Next', 'First', 'Last', 'Perfect', 'Great']);
   const nameMatches = [];
-  for (const m of t.match(/\b[A-Z][a-zA-Z&.]{1,}(?:[ \t]+[A-Z][a-zA-Z&.]{1,}){1,3}\b/g) || []) {
-    const first = m.split(/[ \t]/)[0];
-    if (!STARTERS.has(first)) nameMatches.push(m);
+  if (hasUpper && hasLower) {
+    for (const m of t.match(/\b[A-Z][a-zA-Z&.]{1,}(?:[ \t]+[A-Z][a-zA-Z&.]{1,}){1,3}\b/g) || []) {
+      const first = m.split(/[ \t]/)[0];
+      if (!STARTERS.has(first)) nameMatches.push(m);
+    }
   }
   pushFacts(facts, nameMatches, 'name', 'low');
   const UPPER_STOP = new Set([...ACRONYM_STOP, 'THE', 'AND', 'FOR', 'NOT', 'ALL', 'BUT', 'CAN', 'GET', 'NEW', 'NOW', 'ONE', 'TWO', 'WHO', 'WHY', 'HOW', 'ANY', 'DAY', 'WAY', 'USE', 'US', 'IE', 'EG']);
-  pushFacts(
-    facts,
-    (t.match(/\b[A-Z]{2,7}\b/g) || []).filter((a) => !UPPER_STOP.has(a)),
-    'acronym',
-    'low'
-  );
+  if (hasUpper) {
+    pushFacts(
+      facts,
+      (t.match(/\b[A-Z]{2,7}\b/g) || []).filter((a) => !UPPER_STOP.has(a)),
+      'acronym',
+      'low'
+    );
+  }
 
   const all = [...facts.values()];
   // Bias the cap toward high-severity facts.

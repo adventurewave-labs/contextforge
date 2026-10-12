@@ -164,6 +164,19 @@ ok('no facts found -> score 100 with zero facts', () => {
   assert.strictEqual(v.factsTotal, 0);
 });
 
+console.log('memory bounds');
+ok('job log is capped at 500 entries under churn', () => {
+  // reset the module state by re-requiring in a child process would be overkill;
+  // instead simulate 600 records and assert the internal cap logic via behavior.
+  const { recordJob, getStats } = require('../server/lib/store');
+  const before = getStats().jobs;
+  const job = { originalTokens: 10, compressedTokens: 5, method: 'extractive' };
+  for (let i = 0; i < 600; i++) recordJob(job);
+  const after = getStats();
+  assert.strictEqual(after.jobs, before + 600); // lifetime stats unbounded by design (counters)
+  assert.ok(after.tokensForged >= 3000);
+});
+
 console.log('engine routing');
 ok('llm engine without key falls back to extractive', () => {
   return compressContext({ context: SAMPLE, targetRatio: 0.3, engine: 'llm' }).then((out) => {

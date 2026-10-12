@@ -42,10 +42,17 @@ function splitProse(text, parts) {
     for (let s of pieces) {
       s = s.trim();
       if (!s) continue;
-      // Split monster "sentences" (minified text, logs) on clause breaks.
+      // Split monster "sentences" (minified text, logs, terminator-free runs)
+      // on clause breaks — and hard-chunk at ~300 chars when even those are
+      // absent, so a 1MB wall of 'x' is still a compressible stream.
       if (s.length > 420) {
         let buf = '';
         for (const clause of s.split(/(?<=[;,:])\s+/)) {
+          if (clause.length > 300) {
+            if (buf.trim()) { parts.push(buf); buf = ''; }
+            for (let i = 0; i < clause.length; i += 300) parts.push(clause.slice(i, i + 300));
+            continue;
+          }
           buf += (buf ? ' ' : '') + clause;
           if (buf.length >= 280) {
             parts.push(buf);
