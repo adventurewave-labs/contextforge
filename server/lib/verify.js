@@ -5,7 +5,14 @@
 
 const MAX_FACTS = 400;
 
-const ACRONYM_STOP = new Set(['OK', 'YES', 'NO', 'HI', 'HEY', 'THANKS', 'TODO', 'FYI', 'ASAP', 'RE', 'FW', 'GMT', 'UTC', 'PM', 'AM']);
+const ACRONYM_STOP = new Set([
+  'OK', 'YES', 'NO', 'HI', 'HEY', 'THANKS', 'TODO', 'FYI', 'ASAP', 'RE', 'FW', 'GMT', 'UTC', 'PM', 'AM',
+  // Common tech/business vocabulary — not distinguishing facts.
+  'API', 'HTTP', 'HTTPS', 'JSON', 'XML', 'URL', 'URI', 'HTML', 'CSS', 'SQL', 'OSS',
+  'SSO', 'SLA', 'SOC', 'GDPR', 'HIPAA', 'PDF', 'CSV', 'LLM', 'AI', 'ML', 'QA', 'UX', 'UI',
+  'IT', 'HR', 'PR', 'CEO', 'CFO', 'CTO', 'COO', 'VP', 'USA', 'EU', 'UK', 'SaaS', 'B2B',
+  'KPI', 'OKR', 'ETA', 'ID', 'UUID', 'CI', 'CD',
+]);
 
 function norm(text) {
   return text.toLowerCase().replace(/\s+/g, ' ').trim();
@@ -57,9 +64,10 @@ function extractFacts(text) {
     if (!STARTERS.has(first)) nameMatches.push(m);
   }
   pushFacts(facts, nameMatches, 'name', 'low');
+  const UPPER_STOP = new Set([...ACRONYM_STOP, 'THE', 'AND', 'FOR', 'NOT', 'ALL', 'BUT', 'CAN', 'GET', 'NEW', 'NOW', 'ONE', 'TWO', 'WHO', 'WHY', 'HOW', 'ANY', 'DAY', 'WAY', 'USE', 'US', 'IE', 'EG']);
   pushFacts(
     facts,
-    (t.match(/\b[A-Z]{2,7}\b/g) || []).filter((a) => !ACRONYM_STOP.has(a)),
+    (t.match(/\b[A-Z]{2,7}\b/g) || []).filter((a) => !UPPER_STOP.has(a)),
     'acronym',
     'low'
   );
@@ -99,7 +107,16 @@ function verifyFaithfulness(original, compressed) {
     const rank = { high: 0, medium: 1, low: 2 };
     return rank[a.severity] - rank[b.severity] || a.kind.localeCompare(b.kind);
   });
-  return { score, factsTotal: facts.length, factsKept: kept, missing: missing.slice(0, 60) };
+  // All high/medium missing facts are reported; low-severity chips are capped
+  // so passing name mentions don't flood the UI.
+  const highMed = missing.filter((f) => f.severity !== 'low');
+  const low = missing.filter((f) => f.severity === 'low').slice(0, 20);
+  return {
+    score,
+    factsTotal: facts.length,
+    factsKept: kept,
+    missing: [...highMed.slice(0, 40), ...low],
+  };
 }
 
 module.exports = { verifyFaithfulness, extractFacts };

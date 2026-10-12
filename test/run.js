@@ -106,6 +106,15 @@ ok('high ratio converges to full text', () => {
   assert.ok(ratio > 0.6, `ratio ${ratio}`);
 });
 
+console.log('verifier noise reduction');
+ok('common tech acronyms are not flagged as missing facts', () => {
+  const orig = 'The API returned JSON over HTTPS with SOC 2 compliance. Renewal is 2026-11-01.';
+  const comp = 'Renewal is 2026-11-01.';
+  const v = verifyFaithfulness(orig, comp);
+  assert.ok(!v.missing.some((f) => f.value === 'API' || f.value === 'JSON' || f.value === 'HTTPS'), JSON.stringify(v.missing));
+  assert.ok(v.missing.some((f) => f.value === '2026-11-01') === false); // kept
+});
+
 console.log('faithfulness verification');
 ok('perfect copy scores 100', () => {
   const v = verifyFaithfulness(SAMPLE, SAMPLE);
