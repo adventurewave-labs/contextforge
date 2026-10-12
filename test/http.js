@@ -54,7 +54,7 @@ async function waitUp(child, out) {
 async function main() {
   const out = '';
   const child = spawn(process.execPath, [path.join(__dirname, '..', 'server', 'index.js')], {
-    env: { ...process.env, PORT: String(PORT) },
+    env: { ...process.env, PORT: String(PORT), CORS_ORIGINS: 'https://app.example.com' },
     stdio: ['ignore', 'ignore', 'inherit'],
   });
   try {
@@ -107,6 +107,27 @@ async function main() {
       const { res, json } = await req('GET', '/nope.js');
       assert.strictEqual(res.status, 404);
       assert.strictEqual(json.error, 'not found');
+    });
+
+    console.log('http · CORS');
+    await ok('preflight from allowed origin gets 204 + CORS headers', async () => {
+      const res = await fetch(`${BASE}/api/compress`, {
+        method: 'OPTIONS',
+        headers: { Origin: 'https://app.example.com', 'Access-Control-Request-Method': 'POST' },
+      });
+      assert.strictEqual(res.status, 204);
+      assert.strictEqual(res.headers.get('access-control-allow-origin'), 'https://app.example.com');
+      assert.match(res.headers.get('access-control-allow-methods') || '', /POST/);
+    });
+    await ok('allowed origin sees allow-origin on real responses', async () => {
+      const res = await fetch(`${BASE}/api/stats`, { headers: { Origin: 'https://app.example.com' } });
+      assert.strictEqual(res.status, 200);
+      assert.strictEqual(res.headers.get('access-control-allow-origin'), 'https://app.example.com');
+    });
+    await ok('disallowed origin gets no CORS headers', async () => {
+      const res = await fetch(`${BASE}/api/stats`, { headers: { Origin: 'https://evil.example' } });
+      assert.strictEqual(res.status, 200);
+      assert.strictEqual(res.headers.get('access-control-allow-origin'), null);
     });
 
     console.log('http · API discovery');

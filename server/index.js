@@ -18,6 +18,22 @@ const MAX_CONTEXT_CHARS = 4_000_000; // ~1M tokens
 const RATE_LIMIT_WINDOW_MS = 60_000;
 const RATE_LIMIT_MAX = 40;
 
+// --- CORS (disabled by default; opt in via CORS_ORIGINS, comma-separated) ---
+const CORS_ORIGINS = (process.env.CORS_ORIGINS || '')
+  .split(',').map((s) => s.trim()).filter(Boolean);
+
+function corsHeaders(req) {
+  const origin = req.headers.origin;
+  if (!origin || !CORS_ORIGINS.length || !CORS_ORIGINS.includes(origin)) return {};
+  return {
+    'Access-Control-Allow-Origin': origin,
+    'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+    'Access-Control-Allow-Headers': 'Content-Type, X-Request-ID',
+    'Access-Control-Max-Age': '86400',
+    Vary: 'Origin',
+  };
+}
+
 // --- tiny rate limiter (per-IP, in-memory) ---
 const hits = new Map();
 setInterval(() => {
@@ -321,6 +337,10 @@ const server = http.createServer(async (req, res) => {
       return send(res, 200, { ok: true, uptime: process.uptime(), stats: getStats() });
     }
     if (url.pathname.startsWith('/api/')) {
+      const cors = corsHeaders(req);
+      for (const [k, v] of Object.entries(cors)) res.setHeader(k, v);
+      // Preflight never touches rate limits or handlers.
+      if (req.method === 'OPTIONS') return send(res, 204, '');
       const rl = checkRate(ip);
       res.setHeader('X-RateLimit-Limit', String(RATE_LIMIT_MAX));
       res.setHeader('X-RateLimit-Remaining', String(rl.remaining));
