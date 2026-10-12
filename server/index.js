@@ -38,11 +38,15 @@ function rateLimited(ip) {
 
 // --- helpers ---
 function send(res, status, body, headers) {
-  const data = typeof body === 'string' ? body : JSON.stringify(body);
-  res.writeHead(status, {
-    'Content-Type': typeof body === 'string' ? 'text/html; charset=utf-8' : 'application/json; charset=utf-8',
-    ...(headers || {}),
-  });
+  // Buffers (static files) must be written raw — never JSON.stringify'd.
+  const isBuffer = Buffer.isBuffer(body);
+  const data = isBuffer ? body : typeof body === 'string' ? body : JSON.stringify(body);
+  const type = isBuffer
+    ? 'application/octet-stream'
+    : typeof body === 'string'
+      ? 'text/html; charset=utf-8'
+      : 'application/json; charset=utf-8';
+  res.writeHead(status, { 'Content-Type': type, ...(headers || {}) });
   res.end(data);
 }
 
