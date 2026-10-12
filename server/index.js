@@ -51,6 +51,31 @@ function withSecurity(headers) {
   return { ...SECURITY_HEADERS, ...(headers || {}) };
 }
 
+// --- request IDs + structured access logging ---
+const INBOUND_REQ_ID_RE = /^[A-Za-z0-9._~-]{8,64}$/;
+
+function requestId(req) {
+  // Echo well-formed client-provided IDs (trace correlation); else mint one.
+  const inbound = req.headers['x-request-id'];
+  if (typeof inbound === 'string' && INBOUND_REQ_ID_RE.test(inbound)) return inbound;
+  return crypto.randomUUID();
+}
+
+function logAccess(reqId, req, res, pathname, startedAt) {
+  const ms = Math.round((Number(process.hrtime.bigint() - startedAt) / 1e6) * 10) / 10;
+  const entry = {
+    ts: new Date().toISOString(),
+    msg: 'access',
+    reqId,
+    method: req.method,
+    path: pathname,
+    status: res.statusCode,
+    ms,
+    bytes: Number(res.getHeader('content-length')) || 0,
+  };
+  console.log(JSON.stringify(entry));
+}
+
 function send(res, status, body, headers) {
   // Buffers (static files) must be written raw — never JSON.stringify'd.
   const isBuffer = Buffer.isBuffer(body);
@@ -60,7 +85,11 @@ function send(res, status, body, headers) {
     : typeof body === 'string'
       ? 'text/html; charset=utf-8'
       : 'application/json; charset=utf-8';
-  res.writeHead(status, withSecurity({ 'Content-Type': type, ...(headers || {}) }));
+  res.writeHead(status, withSecurity({
+    'Content-Type': type,
+    'Content-Length': Buffer.byteLength(data),
+    ...(headers || {}),
+  }));
   res.end(data);
 }
 
@@ -157,7 +186,15 @@ async function handleVerify(req, res) {
 
 // --- router ---
 const server = http.createServer(async (req, res) => {
+  const reqId = requestId(req);
+  const startedAt = process.hrtime.bigint();
+  let pathname = req.url;
+  res.setHeader('X-Request-ID', reqId);
+  // 'close' fires for both completed and aborted responses.
+  res.on('close', () => logAccess(reqId, req, res, pathname, startedAt));
+
   const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
+  pathname = url.pathname;
   const ip = (req.headers['x-forwarded-for'] || req.socket.remoteAddress || '?').split(',')[0].trim();
 
   try {
@@ -191,3 +228,5 @@ const server = http.createServer(async (req, res) => {
 server.listen(PORT, () => {
   console.log(`ContextForge listening on :${PORT}`);
 });
+
+module.exports = { server };

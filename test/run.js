@@ -144,6 +144,33 @@ ok('extractive engine reports method extractive', () => {
   });
 });
 
+console.log('http request ids');
+ok('X-Request-ID set on responses, echoes valid inbound id', async () => {
+  const { spawn } = require('child_process');
+  const path = require('path');
+  const port = 3100 + Math.floor(Math.random() * 400);
+  const child = spawn(process.execPath, [path.join(__dirname, '..', 'server', 'index.js')], {
+    env: { ...process.env, PORT: String(port) },
+    stdio: 'ignore',
+  });
+  try {
+    let up = false;
+    for (let i = 0; i < 50 && !up; i++) {
+      await new Promise((r) => setTimeout(r, 100));
+      try { const r = await fetch(`http://127.0.0.1:${port}/health`); up = r.ok; } catch (_) { /* not yet */ }
+    }
+    assert.ok(up, 'server did not come up');
+    const rid = 'test-req-id-1234';
+    const res = await fetch(`http://127.0.0.1:${port}/health`, { headers: { 'X-Request-ID': rid } });
+    assert.strictEqual(res.headers.get('x-request-id'), rid);
+    const res2 = await fetch(`http://127.0.0.1:${port}/health`);
+    const rid2 = res2.headers.get('x-request-id');
+    assert.ok(rid2 && /^[0-9a-f-]{36}$/.test(rid2) && rid2 !== rid, `unexpected id ${rid2}`);
+  } finally {
+    child.kill('SIGKILL');
+  }
+});
+
 Promise.all(pending).then(() => {
   console.log(`\n${passed} passed, ${failed} failed`);
   if (failed) process.exitCode = 1;
