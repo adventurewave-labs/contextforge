@@ -257,7 +257,19 @@ ok('graceful shutdown closes listener within 2s of SIGTERM', async () => {
   }
 });
 
-Promise.all(pending).then(() => {
+// HTTP integration suite runs as a child process; its own exit code decides pass/fail.
+function httpSuite() {
+  const { spawn } = require('child_process');
+  return new Promise((resolve) => {
+    const child = spawn(process.execPath, [require('path').join(__dirname, 'http.js')], { stdio: 'inherit' });
+    child.on('exit', (code) => resolve(code === 0));
+  });
+}
+
+Promise.all(pending).then(async () => {
+  console.log('\nhttp integration (spawned)');
+  const httpOk = await httpSuite();
+  if (!httpOk) failed++;
   console.log(`\n${passed} passed, ${failed} failed`);
   if (failed) process.exitCode = 1;
 });
