@@ -11,6 +11,7 @@ const { verifyFaithfulness } = require('./lib/verify');
 const { estimateTokens } = require('./lib/tokens');
 const { catalog } = require('./lib/models');
 const { recordJob, getStats } = require('./lib/store');
+const pkg = require('../package.json');
 
 const PORT = process.env.PORT || 3000;
 const MAX_BODY = 8 * 1024 * 1024; // 8MB
@@ -334,7 +335,15 @@ const server = http.createServer(async (req, res) => {
 
   try {
     if (url.pathname === '/health' || url.pathname === '/api/health') {
-      return send(res, 200, { ok: true, uptime: process.uptime(), stats: getStats() });
+      const mem = process.memoryUsage();
+      return send(res, 200, {
+        ok: true,
+        version: pkg.version,
+        node: process.version,
+        uptime: Math.round(process.uptime()),
+        memory: { heapUsedMb: +(mem.heapUsed / 1048576).toFixed(1), rssMb: +(mem.rss / 1048576).toFixed(1) },
+        stats: getStats(),
+      });
     }
     if (url.pathname.startsWith('/api/')) {
       const cors = corsHeaders(req);

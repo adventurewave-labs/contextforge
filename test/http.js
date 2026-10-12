@@ -66,6 +66,9 @@ async function main() {
       assert.strictEqual(res.status, 200);
       assert.strictEqual(json.ok, true);
       assert.ok(typeof json.uptime === 'number');
+      assert.match(json.version || '', /^\d+\.\d+\.\d+$/);
+      assert.match(json.node || '', /^v\d+/);
+      assert.ok(json.memory && json.memory.heapUsedMb > 0);
       assert.ok(json.stats && typeof json.stats.jobs === 'number');
     });
     await ok('every response carries security headers', async () => {
