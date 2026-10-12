@@ -109,6 +109,18 @@ async function main() {
       assert.strictEqual(json.error, 'not found');
     });
 
+    console.log('http · static caching');
+    await ok('HTML is served no-cache', async () => {
+      const res = await fetch(`${BASE}/`);
+      assert.strictEqual(res.status, 200);
+      assert.strictEqual(res.headers.get('cache-control'), 'no-cache');
+    });
+    await ok('versioned assets cache immutably for a year', async () => {
+      const res = await fetch(`${BASE}/style.css?v=1.0.0`);
+      assert.strictEqual(res.status, 200);
+      assert.strictEqual(res.headers.get('cache-control'), 'public, max-age=31536000, immutable');
+    });
+
     console.log('http · compression');
     // fetch() auto-decompresses and strips Content-Encoding, so probe with
     // raw http.request to assert what's actually on the wire.

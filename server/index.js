@@ -151,10 +151,19 @@ function serveStatic(req, res, urlPath) {
   if (!resolved.startsWith(root)) return send(res, 403, { error: 'forbidden' });
   fs.readFile(resolved, (err, buf) => {
     if (err) return send(res, 404, { error: 'not found' });
+    const ext = path.extname(resolved);
+    // Versioned assets (?v=) are content-addressed by the HTML that references
+    // them, so they can be cached immutably for a year. HTML stays no-cache so
+    // deploys are picked up instantly.
+    const versioned = /[?&]v=[^&]+/.test(req.url || '');
+    const cache = ext === '.html' || ext === '.json'
+      ? 'no-cache'
+      : versioned
+        ? 'public, max-age=31536000, immutable'
+        : 'public, max-age=86400';
     send(res, 200, buf, {
-      'Content-Type': MIME[path.extname(resolved)] || 'application/octet-stream',
-      'Cache-Control': path.extname(resolved) === '.html' ? 'no-cache' : 'public, max-age=3600',
-      // (cache-control polish lands in a later iteration)
+      'Content-Type': MIME[ext] || 'application/octet-stream',
+      'Cache-Control': cache,
     });
   });
 }
