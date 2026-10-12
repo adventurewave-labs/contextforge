@@ -109,6 +109,18 @@ async function main() {
       assert.strictEqual(json.error, 'not found');
     });
 
+    console.log('http · API discovery');
+    await ok('GET /api/openapi.json describes every endpoint', async () => {
+      const { res, json } = await req('GET', '/api/openapi.json');
+      assert.strictEqual(res.status, 200);
+      assert.strictEqual(json.openapi, '3.0.3');
+      for (const p of ['/api/compress', '/api/verify', '/api/models', '/api/stats', '/health']) {
+        assert.ok(json.paths[p], `missing path ${p}`);
+      }
+      const body = json.paths['/api/compress'].post.requestBody.content['application/json'].schema;
+      assert.ok(body.required.includes('context'));
+    });
+
     console.log('http · static caching');
     await ok('HTML is served no-cache', async () => {
       const res = await fetch(`${BASE}/`);

@@ -168,6 +168,72 @@ function serveStatic(req, res, urlPath) {
   });
 }
 
+// --- OpenAPI description (kept adjacent to the routes it describes) ---
+function openapi() {
+  const errResp = { '400': { description: 'Malformed or invalid request body' }, '429': { description: 'Rate limited' } };
+  return {
+    openapi: '3.0.3',
+    info: {
+      title: 'ContextForge',
+      version: '1.0.0',
+      description: 'Prompt compression with faithfulness verification.',
+      license: { name: 'MIT', url: 'https://github.com/adventurewave-labs/contextforge/blob/main/LICENSE' },
+    },
+    servers: [{ url: '/' }],
+    paths: {
+      '/health': { get: { summary: 'Health + stats', responses: { '200': { description: 'ok' } } } },
+      '/api/models': { get: { summary: 'Model catalog with pricing snapshot', responses: { '200': { description: 'catalog' } } } },
+      '/api/stats': { get: { summary: 'Lifetime forge stats', responses: { '200': { description: 'stats' } } } },
+      '/api/openapi.json': { get: { summary: 'This document', responses: { '200': { description: 'OpenAPI spec' } } } },
+      '/api/compress': {
+        post: {
+          summary: 'Compress a context',
+          requestBody: {
+            required: true,
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'object',
+                  required: ['context'],
+                  properties: {
+                    context: { type: 'string', description: 'Raw context text (<=4M chars)' },
+                    targetRatio: { type: 'number', minimum: 0.05, maximum: 1, default: 0.3 },
+                    engine: { type: 'string', enum: ['extractive', 'llm'], default: 'extractive' },
+                    model: { type: 'string', description: 'OpenRouter model id when engine=llm' },
+                    instructions: { type: 'string', description: 'Must-keep hints (<=2000 chars)' },
+                  },
+                },
+              },
+            },
+          },
+          responses: { '200': { description: 'Forged context + metrics' }, ...errResp },
+        },
+      },
+      '/api/verify': {
+        post: {
+          summary: 'Verify faithfulness of a compression',
+          requestBody: {
+            required: true,
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'object',
+                  required: ['original', 'compressed'],
+                  properties: {
+                    original: { type: 'string' },
+                    compressed: { type: 'string' },
+                  },
+                },
+              },
+            },
+          },
+          responses: { '200': { description: 'Severity-weighted score + missing facts' }, ...errResp },
+        },
+      },
+    },
+  };
+}
+
 // --- API handlers ---
 async function readJson(req) {
   const raw = await readBody(req);
@@ -266,6 +332,9 @@ const server = http.createServer(async (req, res) => {
       }
       if (url.pathname === '/api/models' && req.method === 'GET') {
         return send(res, 200, catalog());
+      }
+      if (url.pathname === '/api/openapi.json' && req.method === 'GET') {
+        return send(res, 200, openapi());
       }
       if (url.pathname === '/api/stats' && req.method === 'GET') {
         return send(res, 200, getStats());
