@@ -4,6 +4,7 @@ const http = require('http');
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
+const zlib = require('zlib');
 
 const { compressContext } = require('./lib/compress');
 const { verifyFaithfulness } = require('./lib/verify');
@@ -80,20 +81,36 @@ function logAccess(reqId, req, res, pathname, startedAt) {
   console.log(JSON.stringify(entry));
 }
 
+const COMPRESSIBLE_TYPE = /^(text\/|application\/json|image\/svg\+xml)/;
+const MIN_COMPRESS_BYTES = 1024;
+
 function send(res, status, body, headers) {
   // Buffers (static files) must be written raw — never JSON.stringify'd.
   const isBuffer = Buffer.isBuffer(body);
-  const data = isBuffer ? body : typeof body === 'string' ? body : JSON.stringify(body);
+  let data = isBuffer ? body : typeof body === 'string' ? body : JSON.stringify(body);
+  if (!Buffer.isBuffer(data)) data = Buffer.from(data);
   const type = isBuffer
     ? 'application/octet-stream'
     : typeof body === 'string'
       ? 'text/html; charset=utf-8'
       : 'application/json; charset=utf-8';
-  res.writeHead(status, withSecurity({
-    'Content-Type': type,
-    'Content-Length': Buffer.byteLength(data),
-    ...(headers || {}),
-  }));
+  const outHeaders = withSecurity({ 'Content-Type': type, ...(headers || {}) });
+
+  // Transparent gzip for compressible responses >=1KB when the client accepts it.
+  // res.req is Node's reference to the incoming request; no signature churn.
+  const acceptEnc = res.req ? String(res.req.headers['accept-encoding'] || '') : '';
+  if (/\bgzip\b/.test(acceptEnc) && data.length >= MIN_COMPRESS_BYTES &&
+      COMPRESSIBLE_TYPE.test(outHeaders['Content-Type'] || '')) {
+    const gz = zlib.gzipSync(data, { level: 6 });
+    if (gz.length < data.length) {
+      data = gz;
+      outHeaders['Content-Encoding'] = 'gzip';
+      outHeaders['Vary'] = 'Accept-Encoding';
+    }
+  }
+
+  outHeaders['Content-Length'] = data.length;
+  res.writeHead(status, outHeaders);
   res.end(data);
 }
 

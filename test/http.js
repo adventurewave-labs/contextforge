@@ -109,6 +109,33 @@ async function main() {
       assert.strictEqual(json.error, 'not found');
     });
 
+    console.log('http · compression');
+    // fetch() auto-decompresses and strips Content-Encoding, so probe with
+    // raw http.request to assert what's actually on the wire.
+    const rawGet = (p, extraHeaders) => new Promise((resolve, reject) => {
+      const r = require('http').get(`${BASE}${p}`, { headers: extraHeaders || {} }, (resp) => {
+        const chunks = [];
+        resp.on('data', (c) => chunks.push(c));
+        resp.on('end', () => resolve({ status: resp.statusCode, headers: resp.headers, body: Buffer.concat(chunks) }));
+      });
+      r.on('error', reject);
+    });
+    await ok('large HTML is gzipped when accepted and decodes cleanly', async () => {
+      const { status, headers, body } = await rawGet('/', { 'Accept-Encoding': 'gzip' });
+      assert.strictEqual(status, 200);
+      assert.strictEqual(headers['content-encoding'], 'gzip');
+      assert.match(headers.vary || '', /Accept-Encoding/);
+      const html = require('zlib').gunzipSync(body).toString();
+      assert.ok(html.includes('ContextForge'));
+      assert.ok(body.length < Buffer.byteLength(html), 'gzip should shrink the page');
+    });
+    await ok('identity when client does not accept gzip', async () => {
+      const { status, headers, body } = await rawGet('/', {});
+      assert.strictEqual(status, 200);
+      assert.strictEqual(headers['content-encoding'], undefined);
+      assert.ok(body.toString().includes('ContextForge'));
+    });
+
     console.log('http · API happy paths');
     await ok('GET /api/models returns catalog', async () => {
       const { res, json } = await req('GET', '/api/models');
