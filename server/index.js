@@ -139,8 +139,31 @@ function serveStatic(req, res, urlPath) {
 }
 
 // --- API handlers ---
+async function readJson(req) {
+  const raw = await readBody(req);
+  if (!raw.trim()) {
+    const err = new Error('request body must be JSON');
+    err.status = 400;
+    throw err;
+  }
+  try {
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      const err = new Error('JSON body must be an object');
+      err.status = 400;
+      throw err;
+    }
+    return parsed;
+  } catch (e) {
+    if (e && e.status) throw e;
+    const err = new Error('invalid JSON body');
+    err.status = 400;
+    throw err;
+  }
+}
+
 async function handleCompress(req, res) {
-  const body = JSON.parse(await readBody(req));
+  const body = await readJson(req);
   const context = typeof body.context === 'string' ? body.context : '';
   if (!context.trim()) return send(res, 400, { error: 'context is required' });
   if (context.length > MAX_CONTEXT_CHARS) {
@@ -176,7 +199,7 @@ async function handleCompress(req, res) {
 }
 
 async function handleVerify(req, res) {
-  const body = JSON.parse(await readBody(req));
+  const body = await readJson(req);
   const { original, compressed } = body;
   if (typeof original !== 'string' || typeof compressed !== 'string') {
     return send(res, 400, { error: 'original and compressed strings are required' });
@@ -217,6 +240,10 @@ const server = http.createServer(async (req, res) => {
     if (req.method !== 'GET') return send(res, 405, { error: 'method not allowed' });
     return serveStatic(req, res, url.pathname);
   } catch (err) {
+    if (err && err.status) {
+      try { send(res, err.status, { error: err.message }); } catch (_) {}
+      return;
+    }
     if (err.message === 'payload too large') {
       try { send(res, 413, { error: 'payload too large' }); } catch (_) {}
       return;

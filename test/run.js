@@ -161,6 +161,41 @@ ok('X-Request-ID set on responses, echoes valid inbound id', async () => {
     await shutdown('SIGTERM');
   }
 });
+ok('malformed JSON returns 400 with consistent error shape', async () => {
+  const { spawn } = require('child_process');
+  const path = require('path');
+  const port = 3500 + Math.floor(Math.random() * 400);
+  const child = spawn(process.execPath, [path.join(__dirname, '..', 'server', 'index.js')], {
+    env: { ...process.env, PORT: String(port) },
+    stdio: 'ignore',
+  });
+  try {
+    let up = false;
+    for (let i = 0; i < 50 && !up; i++) {
+      await new Promise((r) => setTimeout(r, 100));
+      try { const r = await fetch(`http://127.0.0.1:${port}/health`); up = r.ok; } catch (_) { /* not yet */ }
+    }
+    assert.ok(up, 'server did not come up');
+    for (const [body, label] of [
+      ['{"context": "x", ', 'truncated JSON'],
+      ['', 'empty body'],
+      ['[1,2,3]', 'array body'],
+      ['"just a string"', 'string body'],
+      ['null', 'null body'],
+    ]) {
+      const res = await fetch(`http://127.0.0.1:${port}/api/compress`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body,
+      });
+      assert.strictEqual(res.status, 400, `${label}: expected 400, got ${res.status}`);
+      const data = await res.json();
+      assert.ok(typeof data.error === 'string' && data.error.length, `${label}: no error field`);
+    }
+  } finally {
+    child.kill('SIGKILL');
+  }
+});
 ok('graceful shutdown closes listener within 2s of SIGTERM', async () => {
   const { spawn } = require('child_process');
   const path = require('path');
