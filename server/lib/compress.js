@@ -214,7 +214,7 @@ async function llmCompress(context, targetRatio, instructions, model) {
       headers: {
         'Content-Type': 'application/json',
         Authorization: `Bearer ${key}`,
-        'HTTP-Referer': 'https://contextforge.up.railway.app',
+        'HTTP-Referer': 'https://contextforge-production-2ff7.up.railway.app',
         'X-Title': 'ContextForge',
       },
       body: JSON.stringify({
