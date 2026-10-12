@@ -1,0 +1,113 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ContextForge — forge lean LLM contexts</title>
+<meta name="description" content="Compress giant prompts up to 20x and verify nothing important was lost. Open source, self-hostable.">
+<link rel="icon" href="favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header>
+  <img src="logo.svg" alt="ContextForge logo" class="logo">
+  <div>
+    <h1>ContextForge</h1>
+    <p class="tagline">Forge lean LLM contexts. Keep every fact.</p>
+  </div>
+  <nav>
+    <a href="https://github.com/adventurewave-labs/contextforge" target="_blank" rel="noopener">GitHub</a>
+    <a href="#how">How it works</a>
+  </nav>
+</header>
+
+<main>
+<section class="app">
+  <div class="controls card">
+    <div class="row">
+      <label for="ratio">Target size</label>
+      <output id="ratioOut">30%</output>
+      <input type="range" id="ratio" min="5" max="100" step="5" value="30">
+    </div>
+    <div class="row">
+      <label for="engine">Engine</label>
+      <select id="engine">
+        <option value="extractive">Extractive (free, offline)</option>
+        <option value="llm">LLM (your OpenRouter key)</option>
+      </select>
+      <select id="model" class="hidden"></select>
+    </div>
+    <div class="row">
+      <label for="instructions">Must keep <span class="hint">(optional)</span></label>
+      <input type="text" id="instructions" placeholder="e.g. renewal dates, pricing, customer names">
+    </div>
+    <div class="row actions">
+      <button id="forge" class="primary">⚒ Forge context</button>
+      <button id="sample" class="ghost">Load sample</button>
+    </div>
+  </div>
+
+  <div class="io">
+    <div class="card pane">
+      <h2>Raw context <span class="hint" id="inMeta">—</span></h2>
+      <textarea id="input" spellcheck="false" placeholder="Paste your giant prompt, ticket thread, transcript, RAG pile…"></textarea>
+    </div>
+    <div class="card pane">
+      <h2>Forged context <span class="hint" id="outMeta">—</span></h2>
+      <textarea id="output" spellcheck="false" readonly placeholder="Compressed, verified context appears here."></textarea>
+      <button id="copy" class="ghost" disabled>Copy forged context</button>
+    </div>
+  </div>
+
+  <div id="results" class="hidden">
+    <div class="metrics">
+      <div class="metric card"><span id="mRatio">–</span><label>compression</label></div>
+      <div class="metric card"><span id="mTokens">–</span><label>tokens</label></div>
+      <div class="metric card"><span id="mTime">–</span><label>latency</label></div>
+      <div class="metric card"><span id="mMethod">–</span><label>engine</label></div>
+    </div>
+
+    <div class="card verify">
+      <h2>Faithfulness <span id="score" class="score">–</span></h2>
+      <div class="meter"><div id="scoreBar"></div></div>
+      <p class="hint" id="verifyMeta">Verify checks that every number, date, URL, email and proper noun survived compression.</p>
+      <div id="missing" class="missing hidden">
+        <h3>Missing facts</h3>
+        <ul id="missingList"></ul>
+      </div>
+    </div>
+
+    <div class="card savings">
+      <h2>What you'd save per call</h2>
+      <div id="savingsRows"></div>
+    </div>
+  </div>
+</section>
+
+<section id="how" class="how card">
+  <h2>How it works</h2>
+  <img src="assets/workflow.svg" alt="ContextForge workflow: raw context in, compression engine, faithfulness verification, forged context out">
+  <div class="cols">
+    <div>
+      <h3>1 · Score</h3>
+      <p>The extractive engine splits your context into sentences and scores each by information density, with primacy/recency weighting — because models forget the middle (<em>Lost in the Middle</em>, TACL 2023).</p>
+    </div>
+    <div>
+      <h3>2 · Forge</h3>
+      <p>Top sentences fill your token budget in original order. First and last sentences are always kept. Numbers, dates and URLs get extra protection.</p>
+    </div>
+    <div>
+      <h3>3 · Verify</h3>
+      <p>Every checkable fact in the original is matched against the output. Anything missing is flagged by severity before you ship the prompt.</p>
+    </div>
+  </div>
+</section>
+
+<footer class="card">
+  <div id="stats">—</div>
+  <p class="hint">Built by <a href="https://github.com/adventurewave-labs" target="_blank" rel="noopener">Adventurewave Labs</a> · zero-dependency Node · deploy to Railway in one click · MIT license.</p>
+</footer>
+</main>
+<script src="app.js"></script>
+</body>
+</html>

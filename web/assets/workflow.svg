@@ -1,0 +1,74 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1120 300" width="1120" height="300" role="img" aria-label="ContextForge workflow diagram">
+  <defs>
+    <linearGradient id="acc" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#ffb347"/>
+      <stop offset="1" stop-color="#ff7847"/>
+    </linearGradient>
+    <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0 0 L10 5 L0 10 z" fill="#8b98ac"/>
+    </marker>
+  </defs>
+  <style>
+    .box { fill:#151b26; stroke:#232c3b; stroke-width:1.5; rx:12; }
+    .title { font:700 17px system-ui,sans-serif; fill:#dbe4f0; }
+    .sub { font:400 12.5px system-ui,sans-serif; fill:#8b98ac; }
+    .step { font:700 11px ui-monospace,monospace; fill:#ffb347; letter-spacing:1px; }
+    .fact { font:600 12px ui-monospace,monospace; fill:#4ade80; }
+    .warn { font:600 12px ui-monospace,monospace; fill:#f87171; }
+  </style>
+
+  <!-- Raw context -->
+  <rect class="box" x="20" y="60" width="230" height="180" rx="12"/>
+  <text class="step" x="40" y="88">INPUT</text>
+  <text class="title" x="40" y="112">Raw context</text>
+  <rect x="40" y="126" width="190" height="8" rx="4" fill="#2a3547"/>
+  <rect x="40" y="142" width="170" height="8" rx="4" fill="#2a3547"/>
+  <rect x="40" y="158" width="185" height="8" rx="4" fill="#2a3547"/>
+  <rect x="40" y="174" width="120" height="8" rx="4" fill="#2a3547"/>
+  <rect x="40" y="190" width="178" height="8" rx="4" fill="#2a3547"/>
+  <text class="sub" x="40" y="222">200K tokens · $$$</text>
+
+  <!-- Forge -->
+  <rect x="290" y="70" width="220" height="160" rx="14" fill="#10141d" stroke="url(#acc)" stroke-width="2"/>
+  <text class="step" x="310" y="98" fill="#ffb347">STAGE 1</text>
+  <text class="title" x="310" y="122">Score</text>
+  <text class="sub" x="310" y="144">sentence TF density</text>
+  <text class="sub" x="310" y="162">primacy / recency weights</text>
+  <text class="sub" x="310" y="180">numbers · dates · URLs ↑</text>
+  <text class="sub" x="310" y="210">“lost in the middle” fix</text>
+
+  <!-- Budget -->
+  <rect x="550" y="70" width="220" height="160" rx="14" fill="#10141d" stroke="url(#acc)" stroke-width="2"/>
+  <text class="step" x="570" y="98">STAGE 2</text>
+  <text class="title" x="570" y="122">Forge</text>
+  <text class="sub" x="570" y="144">greedy budget fill</text>
+  <text class="sub" x="570" y="162">original order kept</text>
+  <text class="sub" x="570" y="180">first &amp; last always kept</text>
+  <text class="sub" x="570" y="210">3–20x smaller</text>
+
+  <!-- Verify -->
+  <rect x="810" y="70" width="220" height="160" rx="14" fill="#10141d" stroke="url(#acc)" stroke-width="2"/>
+  <text class="step" x="830" y="98">STAGE 3</text>
+  <text class="title" x="830" y="122">Verify</text>
+  <text class="fact" x="830" y="146">✓ $18.4M kept</text>
+  <text class="fact" x="830" y="164">✓ 2026-11-01 kept</text>
+  <text class="warn" x="830" y="182">✗ email dropped ⚠</text>
+  <text class="sub" x="830" y="210">faithfulness score 92</text>
+
+  <!-- Output -->
+  <rect class="box" x="880" y="0" width="0" height="0"/>
+  <rect class="box" x="20" y="0" width="0" height="0"/>
+
+  <!-- arrows -->
+  <line x1="250" y1="150" x2="288" y2="150" stroke="#8b98ac" stroke-width="2" marker-end="url(#arr)"/>
+  <line x1="510" y1="150" x2="548" y2="150" stroke="#8b98ac" stroke-width="2" marker-end="url(#arr)"/>
+  <line x1="770" y1="150" x2="808" y2="150" stroke="#8b98ac" stroke-width="2" marker-end="url(#arr)"/>
+
+  <!-- output row -->
+  <rect class="box" x="290" y="250" width="740" height="42" rx="10"/>
+  <text class="title" x="310" y="277" font-size="15">Forged context →</text>
+  <text class="sub" x="450" y="277">20K tokens · every fact accounted for · copy into your pipeline</text>
+  <line x1="920" y1="230" x2="920" y2="250" stroke="#8b98ac" stroke-width="2" marker-end="url(#arr)"/>
+
+  <text class="sub" x="40" y="30" font-size="13" fill="#8b98ac">ContextForge — three deterministic stages, sub-second, no API key required</text>
+</svg>
