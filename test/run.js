@@ -146,13 +146,32 @@ ok('extractive engine reports method extractive', () => {
 
 console.log('http request ids');
 ok('X-Request-ID set on responses, echoes valid inbound id', async () => {
+  const port = 3100 + Math.floor(Math.random() * 400);
+  process.env.PORT = String(port);
+  const { start, shutdown } = require('../server/index');
+  await start();
+  try {
+    const rid = 'test-req-id-1234';
+    const res = await fetch(`http://127.0.0.1:${port}/health`, { headers: { 'X-Request-ID': rid } });
+    assert.strictEqual(res.headers.get('x-request-id'), rid);
+    const res2 = await fetch(`http://127.0.0.1:${port}/health`);
+    const rid2 = res2.headers.get('x-request-id');
+    assert.ok(rid2 && /^[0-9a-f-]{36}$/.test(rid2) && rid2 !== rid, `unexpected id ${rid2}`);
+  } finally {
+    await shutdown('SIGTERM');
+  }
+});
+ok('graceful shutdown closes listener within 2s of SIGTERM', async () => {
   const { spawn } = require('child_process');
   const path = require('path');
-  const port = 3100 + Math.floor(Math.random() * 400);
+  const port = 3500 + Math.floor(Math.random() * 400);
   const child = spawn(process.execPath, [path.join(__dirname, '..', 'server', 'index.js')], {
     env: { ...process.env, PORT: String(port) },
-    stdio: 'ignore',
+    stdio: ['ignore', 'pipe', 'pipe'],
   });
+  let out = '';
+  child.stdout.on('data', (c) => { out += c; });
+  child.stderr.on('data', (c) => { out += c; });
   try {
     let up = false;
     for (let i = 0; i < 50 && !up; i++) {
@@ -160,12 +179,13 @@ ok('X-Request-ID set on responses, echoes valid inbound id', async () => {
       try { const r = await fetch(`http://127.0.0.1:${port}/health`); up = r.ok; } catch (_) { /* not yet */ }
     }
     assert.ok(up, 'server did not come up');
-    const rid = 'test-req-id-1234';
-    const res = await fetch(`http://127.0.0.1:${port}/health`, { headers: { 'X-Request-ID': rid } });
-    assert.strictEqual(res.headers.get('x-request-id'), rid);
-    const res2 = await fetch(`http://127.0.0.1:${port}/health`);
-    const rid2 = res2.headers.get('x-request-id');
-    assert.ok(rid2 && /^[0-9a-f-]{36}$/.test(rid2) && rid2 !== rid, `unexpected id ${rid2}`);
+    const exitCode = await new Promise((resolve) => {
+      const t = setTimeout(() => resolve('timeout'), 2000);
+      child.on('exit', (code) => { clearTimeout(t); resolve(code); });
+      child.kill('SIGTERM');
+    });
+    assert.strictEqual(exitCode, 0, `exit code ${exitCode}; output: ${out.slice(-500)}`);
+    assert.ok(out.includes('"msg":"shutdown"') || out.includes('shutdown'), `no shutdown log: ${out.slice(-500)}`);
   } finally {
     child.kill('SIGKILL');
   }

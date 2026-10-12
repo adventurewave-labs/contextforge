@@ -225,8 +225,46 @@ const server = http.createServer(async (req, res) => {
   }
 });
 
-server.listen(PORT, () => {
-  console.log(`ContextForge listening on :${PORT}`);
-});
+function start() {
+  return new Promise((resolve) => {
+    server.listen(PORT, () => {
+      console.log(`ContextForge listening on :${PORT}`);
+      resolve(server);
+    });
+  });
+}
 
-module.exports = { server };
+// --- graceful shutdown (Railway sends SIGTERM before killing the box) ---
+const SHUTDOWN_GRACE_MS = Number(process.env.SHUTDOWN_GRACE_MS) || 10_000;
+let shuttingDown = false;
+
+// Drains connections and resolves once the listener is closed (or grace
+// expires). Never calls process.exit — that's the caller's call.
+function shutdown(signal) {
+  if (shuttingDown) return Promise.resolve();
+  shuttingDown = true;
+  console.log(JSON.stringify({
+    ts: new Date().toISOString(), msg: 'shutdown', signal,
+    note: `draining connections (${SHUTDOWN_GRACE_MS}ms grace)`,
+  }));
+  // Node 18.2+: idle keep-alives otherwise hold close() open for their timeout.
+  if (typeof server.closeIdleConnections === 'function') server.closeIdleConnections();
+  return new Promise((resolve) => {
+    server.close(() => resolve());
+    setTimeout(() => {
+      if (typeof server.closeAllConnections === 'function') server.closeAllConnections();
+      resolve();
+    }, SHUTDOWN_GRACE_MS).unref();
+  });
+}
+
+if (require.main === module) {
+  start();
+  for (const sig of ['SIGTERM', 'SIGINT']) {
+    process.on(sig, () => {
+      shutdown(sig).then(() => process.exit(0));
+    });
+  }
+}
+
+module.exports = { server, start, shutdown };
