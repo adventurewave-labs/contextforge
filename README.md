@@ -201,3 +201,49 @@ MIT © Adventurewave Labs
 Research grounding: *Lost in the Middle* (Liu et al., TACL 2023) · *RULER*
 (Hsieh et al., COLM 2024) · *LLMLingua* (Jiang et al., EMNLP 2023). Pricing
 snapshot from the OpenRouter catalog (2026-10-12).
+
+---
+
+## Operations runbook
+
+### Deploy
+
+- **Via CLI (used by the hardening loop):** `railway up --ci --service contextforge` from the repo root. Build is the Dockerfile; health gate is `/health` (`railway.json`).
+- **Via Railway UI:** the service auto-deploys from connected repo pushes once linked; otherwise use "Deploy latest".
+- Zero npm dependencies means no `npm install`, no lockfile drift, and ~30s cold builds.
+
+### Environment variables
+
+| Var | Default | Purpose |
+|---|---|---|
+| `PORT` | `3000` | Listen port (Railway injects this) |
+| `OPENROUTER_API_KEY` | – | Enables the LLM compression engine; absent = extractive only, LLM requests fall back with `fallbackReason` |
+| `RATE_LIMIT_MAX` | `40` | Requests/min/IP (hard-capped at 10,000) |
+| `CORS_ORIGINS` | – | Comma-separated strict allowlist, e.g. `https://app.example.com`; unset = no CORS headers |
+| `SHUTDOWN_GRACE_MS` | `10000` | SIGTERM drain window before forced close |
+
+### Health & monitoring
+
+- `GET /health` → `ok`, `version`, `node`, `uptime`, `memory.{heapUsedMb,rssMb}`, lifetime `stats`. Wire this to your uptime checker.
+- Logs are JSON lines: access entries carry `reqId`, `method`, `path`, `status`, `ms`, `bytes`; shutdown logs `{"msg":"shutdown"}`. `X-Request-ID` is echoed from inbound headers when well-formed for trace correlation.
+- Load reference (single replica, local): 303 req/s, p95 152.7ms — see `docs/benchmark.md`.
+
+### Rollback
+
+1. `railway rollback` in the project dashboard (pick the previous healthy deployment), **or**
+2. `git revert <sha> && git push && railway up --ci --service contextforge` for a code-level revert that keeps history forward-moving.
+
+Verify after any rollback: `curl -s https://<host>/health | jq .ok` must be `true`.
+
+### Troubleshooting
+
+| Symptom | First checks |
+|---|---|
+| 502 at the domain | `railway logs --service contextforge` — crash loop usually means a bad CMD/entrypoint (see `ac0b100` incident note: never pass `--init` to node) |
+| 429s in production | Intended rate limiting; raise `RATE_LIMIT_MAX` if behind a gateway that proxies many users through one IP |
+| LLM engine always `extractive` | `OPENROUTER_API_KEY` not set on the service; check `fallbackReason` in the compress response |
+| Slow giant inputs | Pathological walls of repeated characters were fixed (guard-railed fact extraction); if a new shape stalls, capture the input shape and file an issue |
+
+### Incident notes (loop history)
+
+- **04:50Z, iter 19:** Dockerfile used `node --init` (invalid flag — `--init` belongs to `docker run`). Container crash-looped; caught within ~3 min via `/health` 502 + logs, fixed in `ac0b100`, verified recovered. Lesson recorded here so it never repeats.
