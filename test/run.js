@@ -196,6 +196,37 @@ ok('malformed JSON returns 400 with consistent error shape', async () => {
     child.kill('SIGKILL');
   }
 });
+ok('429 carries Retry-After and X-RateLimit-* headers', async () => {
+  const { spawn } = require('child_process');
+  const path = require('path');
+  const port = 3500 + Math.floor(Math.random() * 400);
+  const child = spawn(process.execPath, [path.join(__dirname, '..', 'server', 'index.js')], {
+    env: { ...process.env, PORT: String(port) },
+    stdio: 'ignore',
+  });
+  try {
+    let up = false;
+    for (let i = 0; i < 50 && !up; i++) {
+      await new Promise((r) => setTimeout(r, 100));
+      try { const r = await fetch(`http://127.0.0.1:${port}/health`); up = r.ok; } catch (_) { /* not yet */ }
+    }
+    assert.ok(up, 'server did not come up');
+    let last;
+    for (let i = 0; i < 45; i++) {
+      last = await fetch(`http://127.0.0.1:${port}/api/models`);
+    }
+    assert.strictEqual(last.status, 429, `expected 429, got ${last.status}`);
+    const ra = Number(last.headers.get('retry-after'));
+    assert.ok(ra >= 1 && ra <= 60, `Retry-After ${ra}`);
+    assert.strictEqual(last.headers.get('x-ratelimit-limit'), '40');
+    assert.strictEqual(last.headers.get('x-ratelimit-remaining'), '0');
+    assert.ok(/^\d+$/.test(last.headers.get('x-ratelimit-reset') || ''), 'bad reset');
+    const data = await last.json();
+    assert.ok(data.error.includes('rate limit'));
+  } finally {
+    child.kill('SIGKILL');
+  }
+});
 ok('graceful shutdown closes listener within 2s of SIGTERM', async () => {
   const { spawn } = require('child_process');
   const path = require('path');

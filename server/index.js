@@ -28,12 +28,16 @@ setInterval(() => {
   }
 }, RATE_LIMIT_WINDOW_MS).unref();
 
-function rateLimited(ip) {
+function checkRate(ip) {
   const now = Date.now();
   const times = (hits.get(ip) || []).filter((t) => t > now - RATE_LIMIT_WINDOW_MS);
-  times.push(now);
-  hits.set(ip, times);
-  return times.length > RATE_LIMIT_MAX;
+  const limited = times.length >= RATE_LIMIT_MAX;
+  if (!limited) times.push(now);
+  if (times.length) hits.set(ip, times);
+  else hits.delete(ip);
+  const oldest = times.length ? times[0] : now;
+  const resetMs = Math.max(0, oldest + RATE_LIMIT_WINDOW_MS - now);
+  return { limited, remaining: Math.max(0, RATE_LIMIT_MAX - times.length), resetMs };
 }
 
 // --- helpers ---
@@ -225,6 +229,15 @@ const server = http.createServer(async (req, res) => {
       return send(res, 200, { ok: true, uptime: process.uptime(), stats: getStats() });
     }
     if (url.pathname.startsWith('/api/')) {
+      const rl = checkRate(ip);
+      res.setHeader('X-RateLimit-Limit', String(RATE_LIMIT_MAX));
+      res.setHeader('X-RateLimit-Remaining', String(rl.remaining));
+      res.setHeader('X-RateLimit-Reset', String(Math.ceil((Date.now() + rl.resetMs) / 1000)));
+      if (rl.limited) {
+        return send(res, 429, { error: 'rate limit exceeded, retry later' }, {
+          'Retry-After': String(Math.max(1, Math.ceil(rl.resetMs / 1000))),
+        });
+      }
       if (url.pathname === '/api/models' && req.method === 'GET') {
         return send(res, 200, catalog());
       }
