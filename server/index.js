@@ -37,6 +37,20 @@ function rateLimited(ip) {
 }
 
 // --- helpers ---
+const SECURITY_HEADERS = {
+  'X-Content-Type-Options': 'nosniff',
+  'X-Frame-Options': 'DENY',
+  'Referrer-Policy': 'strict-origin-when-cross-origin',
+  'Permissions-Policy': 'camera=(), microphone=(), geolocation=()',
+  'Content-Security-Policy':
+    "default-src 'self'; img-src 'self' data:; style-src 'self'; script-src 'self'; " +
+    "connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'",
+};
+
+function withSecurity(headers) {
+  return { ...SECURITY_HEADERS, ...(headers || {}) };
+}
+
 function send(res, status, body, headers) {
   // Buffers (static files) must be written raw — never JSON.stringify'd.
   const isBuffer = Buffer.isBuffer(body);
@@ -46,7 +60,7 @@ function send(res, status, body, headers) {
     : typeof body === 'string'
       ? 'text/html; charset=utf-8'
       : 'application/json; charset=utf-8';
-  res.writeHead(status, { 'Content-Type': type, ...(headers || {}) });
+  res.writeHead(status, withSecurity({ 'Content-Type': type, ...(headers || {}) }));
   res.end(data);
 }
 
@@ -90,6 +104,7 @@ function serveStatic(req, res, urlPath) {
     send(res, 200, buf, {
       'Content-Type': MIME[path.extname(resolved)] || 'application/octet-stream',
       'Cache-Control': path.extname(resolved) === '.html' ? 'no-cache' : 'public, max-age=3600',
+      // (cache-control polish lands in a later iteration)
     });
   });
 }
