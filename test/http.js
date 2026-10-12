@@ -106,10 +106,15 @@ async function main() {
       const { res } = await req('GET', '/%2e%2e/%2e%2e/etc/passwd');
       assert.ok(res.status === 403 || res.status === 404, `status ${res.status}`);
     });
-    await ok('unknown static path returns 404 JSON', async () => {
-      const { res, json } = await req('GET', '/nope.js');
+    await ok('unknown static path returns branded 404 HTML page', async () => {
+      const { res, text } = await req('GET', '/nope.js');
       assert.strictEqual(res.status, 404);
-      assert.strictEqual(json.error, 'not found');
+      assert.match(res.headers.get('content-type') || '', /text\/html/);
+      assert.ok(text.includes('back to the forge'));
+    });
+    await ok('traversal now gets the 404 page too (no path oracle)', async () => {
+      const { res } = await req('GET', '/%2e%2e/%2e%2e/etc/passwd');
+      assert.strictEqual(res.status, 404);
     });
 
     console.log('http · CORS');

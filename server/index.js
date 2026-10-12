@@ -160,14 +160,27 @@ const MIME = {
   '.txt': 'text/plain; charset=utf-8',
 };
 
+function notFoundPage(res) {
+  const html = '<!doctype html><html lang="en"><head><meta charset="utf-8">' +
+    '<meta name="viewport" content="width=device-width, initial-scale=1">' +
+    '<title>404 · ContextForge</title>' +
+    '<style>body{background:#0b0e14;color:#dbe4f0;font:16px/1.6 system-ui,sans-serif;' +
+    'display:grid;place-items:center;height:100vh;margin:0;text-align:center}' +
+    'a{color:#ffb347}</style></head><body><div>' +
+    '<h1 style="font-size:56px;margin:0">404</h1>' +
+    '<p>Nothing forged here.</p>' +
+    '<p><a href="/">← back to the forge</a></p></div></body></html>';
+  send(res, 404, html);
+}
+
 function serveStatic(req, res, urlPath) {
   let p = urlPath === '/' ? '/index.html' : urlPath;
   p = p.split('?')[0];
   const root = path.join(__dirname, '..', 'web');
   const resolved = path.join(root, path.normalize(p));
-  if (!resolved.startsWith(root)) return send(res, 403, { error: 'forbidden' });
+  if (!resolved.startsWith(root)) return notFoundPage(res);
   fs.readFile(resolved, (err, buf) => {
-    if (err) return send(res, 404, { error: 'not found' });
+    if (err) return notFoundPage(res);
     const ext = path.extname(resolved);
     // Versioned assets (?v=) are content-addressed by the HTML that references
     // them, so they can be cached immutably for a year. HTML stays no-cache so
@@ -374,7 +387,10 @@ const server = http.createServer(async (req, res) => {
       if (url.pathname === '/api/verify') return await handleVerify(req, res);
       return send(res, 404, { error: 'not found' });
     }
-    if (req.method !== 'GET') return send(res, 405, { error: 'method not allowed' });
+    if (req.method !== 'GET') {
+      res.setHeader('Allow', 'GET, HEAD');
+      return send(res, 405, '<!doctype html><p>method not allowed</p>');
+    }
     return serveStatic(req, res, url.pathname);
   } catch (err) {
     if (err && err.status) {
