@@ -221,45 +221,86 @@ async function llmCompress(context, targetRatio, instructions, model) {
     const fb = extractiveCompress(context, targetRatio, instructions);
     return { ...fb, fallbackReason: 'No OPENROUTER_API_KEY set — used extractive engine.' };
   }
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 60000);
-  try {
-    const words = context.split(/\s+/).length;
-    const targetWords = Math.max(50, Math.round(words * targetRatio));
-    const res = await fetch('https://openrouter.ai/api/v1/chat/completions', {
-      method: 'POST',
-      signal: controller.signal,
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${key}`,
-        'HTTP-Referer': 'https://contextforge-production-2ff7.up.railway.app',
-        'X-Title': 'ContextForge',
+  const words = context.split(/\s+/).length;
+  const targetWords = Math.max(50, Math.round(words * targetRatio));
+  const payload = JSON.stringify({
+    model: model || 'anthropic/claude-haiku-5.5',
+    temperature: 0.2,
+    max_tokens: Math.min(16000, Math.round(targetWords * 2.2)),
+    messages: [
+      { role: 'system', content: COMPRESS_SYSTEM_PROMPT },
+      {
+        role: 'user',
+        content:
+          `Compress this context to approximately ${Math.round(targetRatio * 100)}% of its size ` +
+          `(about ${targetWords} words).${instructions ? `\nPreserve especially: ${instructions}` : ''}\n\n` +
+          context,
       },
-      body: JSON.stringify({
-        model: model || 'anthropic/claude-haiku-5.5',
-        temperature: 0.2,
-        max_tokens: Math.min(16000, Math.round(targetWords * 2.2)),
-        messages: [
-          { role: 'system', content: COMPRESS_SYSTEM_PROMPT },
-          {
-            role: 'user',
-            content:
-              `Compress this context to approximately ${Math.round(targetRatio * 100)}% of its size ` +
-              `(about ${targetWords} words).${instructions ? `\nPreserve especially: ${instructions}` : ''}\n\n` +
-              context,
-          },
-        ],
-      }),
-    });
-    if (!res.ok) throw new Error(`OpenRouter ${res.status}`);
-    const data = await res.json();
-    const compressed = data && data.choices && data.choices[0] && data.choices[0].message
-      ? data.choices[0].message.content.trim()
-      : '';
-    if (!compressed) throw new Error('empty completion');
-    return { compressed, kept: null, total: null };
-  } finally {
-    clearTimeout(timer);
+    ],
+  });
+
+  // One attempt = one fetch with a hard timeout (env-tunable, default 45s).
+  const TIMEOUT_MS = Math.max(5000, Number(process.env.LLM_TIMEOUT_MS) || 45_000);
+  const attempt = async () => {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), TIMEOUT_MS);
+    try {
+      const res = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+        method: 'POST',
+        signal: controller.signal,
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${key}`,
+          'HTTP-Referer': 'https://contextforge-production-2ff7.up.railway.app',
+          'X-Title': 'ContextForge',
+        },
+        body: payload,
+      });
+      if (res.status >= 500 || res.status === 429) {
+        const err = new Error(`openrouter ${res.status}`);
+        err.taxonomy = 'transient';
+        throw err;
+      }
+      if (!res.ok) {
+        const err = new Error(`openrouter ${res.status}`);
+        err.taxonomy = 'client-error';
+        throw err;
+      }
+      const data = await res.json();
+      const compressed = data && data.choices && data.choices[0] && data.choices[0].message
+        ? data.choices[0].message.content.trim()
+        : '';
+      if (!compressed) {
+        const err = new Error('empty completion');
+        err.taxonomy = 'empty-completion';
+        throw err;
+      }
+      return { compressed, kept: null, total: null };
+    } catch (e) {
+      if (e.name === 'AbortError') {
+        const err = new Error(`timeout after ${TIMEOUT_MS}ms`);
+        err.taxonomy = 'timeout';
+        throw err;
+      }
+      if (!e.taxonomy) e.taxonomy = 'transient'; // network errors are transient
+      throw e;
+    } finally {
+      clearTimeout(timer);
+    }
+  };
+
+  // Retry once on transient failures (5xx/429/network); deterministic 4xx fails fast.
+  try {
+    return await attempt();
+  } catch (first) {
+    if (first.taxonomy !== 'transient') throw first;
+    try {
+      return await attempt();
+    } catch (second) {
+      const err = new Error(`${second.taxonomy}: ${second.message} (after retry)`);
+      err.taxonomy = second.taxonomy;
+      throw err;
+    }
   }
 }
 
