@@ -14,13 +14,31 @@ const STOPWORDS = new Set(
 );
 
 function splitSentences(text) {
+  // Fenced code blocks are atomic units: never split mid-fence, keep or drop
+  // the whole block. Extract them first, then split the prose around them.
   const parts = [];
+  const segments = text.split(/(```[\s\S]*?(?:```|$))/g);
+  for (const segment of segments) {
+    if (segment.startsWith('```')) {
+      if (segment.trim()) parts.push(segment.trim());
+      continue;
+    }
+    splitProse(segment, parts);
+  }
+  return parts.length ? parts : [text];
+}
+
+function splitProse(text, parts) {
   // Newlines are hard breaks (logs, transcripts, chat threads).
   for (const line of text.split(/\n+/)) {
     if (!line.trim()) continue;
     // Split only where punctuation ENDS a sentence (followed by whitespace).
     // Decimals like 18.4 and URLs like example.com/report never match this.
-    const pieces = line.split(/(?<=[.!?])\s+/);
+// CJK terminators need no trailing space — pad them with one so the same
+    // rule applies. ASCII .!? only split when followed by whitespace, so
+    // $18.4 and example.com/report never break.
+    const prepared = line.replace(/([\u3002\uff01\uff1f])+/g, '$1 ');
+    const pieces = prepared.split(/(?<=[.!?\u3002\uff01\uff1f])\s+/);
     for (let s of pieces) {
       s = s.trim();
       if (!s) continue;

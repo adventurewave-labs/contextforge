@@ -45,6 +45,31 @@ ok('empty input is 0, tiny input >= 1', () => {
   assert.ok(estimateTokens('hi') >= 1);
 });
 
+console.log('engine edge cases');
+ok('CJK sentences split on 。！？ terminators', () => {
+  const parts = splitSentences('这是第一句话。这是第二句话！这是第三句话？');
+  assert.strictEqual(parts.length, 3);
+});
+ok('CJK token estimate is realistic (not chars/4)', () => {
+  const t = estimateTokens('这是第一句话。这是第二句话！这是第三句话？这是第四句话。');
+  // 20 CJK chars ≈ 15 tokens under 0.75 weighting; chars/4 would say ~5.
+  assert.ok(t >= 12, `got ${t}`);
+});
+ok('fenced code blocks stay atomic', () => {
+  const fence = 'Intro.\n```js\nconst a = 1; // periods. inside\n```\nClosing.';
+  const parts = splitSentences(fence);
+  assert.strictEqual(parts.length, 3);
+  assert.ok(parts.some((p) => p.startsWith('```') && p.includes('periods')));
+});
+ok('compression keeps a fenced code block when facts live in it', () => {
+  const text = 'Filler intro sentence with nothing important at all in it whatsoever.\n' +
+    'More filler text here that also says nothing worth keeping honestly.\n' +
+    '\u0060\u0060\u0060js\nconst RENEWAL_DATE = \'2026-11-01\';\nconst PRICE = \'$18,400\';\n\u0060\u0060\u0060\n' +
+    'Trailing filler sentence that contributes nothing to the meaning here.\n';
+  const out = extractiveCompress(text, 0.5);
+  assert.ok(out.compressed.includes('2026-11-01'), out.compressed);
+});
+
 console.log('sentence splitting');
 ok('decimals and URLs do not split sentences', () => {
   const parts = splitSentences('Revenue was $18.4 million, see https://acme.example.com/report. Next line.');
