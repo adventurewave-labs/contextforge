@@ -1,0 +1,10 @@
+# contextforge
+
+> ⚒ Prompt compression with a receipt — forge lean LLM contexts and verify nothing important was lost. Zero-dependency Node + Railway deploy.
+
+contextforge is maintained by Adventure Wave Labs (The lab for agentic developer tooling).
+
+## Links
+
+- [Landing page](https://adventurewave-labs.github.io/contextforge/): overview, features, FAQ
+- [Source code](https://github.com/adventurewave-labs/contextforge): README, issues, releases
