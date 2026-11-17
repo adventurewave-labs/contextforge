@@ -180,7 +180,7 @@ unless you enable the LLM engine.
 ## Tests
 
 ```bash
-npm test    # 18 tests, zero dependencies
+npm test    # 28 tests, zero dependencies
 ```
 
 ---
