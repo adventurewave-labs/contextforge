@@ -274,6 +274,44 @@ ok('a failing prune rolls the share back and keeps the result pending', () => {
   assert.throws(() => s.shareJob(job.jobId), 'result should still be pending (retry hits prune again, not expired)');
   s.close();
 });
+ok('a failing unshared prune rolls back the job and lifetime counters', () => {
+  const file = tmpDb();
+  const store = createStore({ file });
+  const { DatabaseSync } = require('node:sqlite');
+  const raw = new DatabaseSync(file);
+  try {
+    // Fill the retention window so the next prune has a row to delete.
+    raw.exec(`
+      WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 10000)
+      INSERT INTO jobs (id, created_at, engine, method, original_tokens, compressed_tokens,
+        ratio, compression, elapsed_ms, est_savings_usd)
+      SELECT 'old-' || i, '2000-01-01T00:00:00.000Z', 'extractive', 'extractive',
+        10, 5, 0.5, 2, 0, 0 FROM n;
+      CREATE TRIGGER fail_prune BEFORE DELETE ON jobs
+      BEGIN SELECT RAISE(ABORT, 'prune failed'); END;
+    `);
+    const countersOnly = { originalTokens: 10, compressedTokens: 5, method: 'extractive' };
+    for (let i = 0; i < 99; i++) store.recordJob(countersOnly);
+    const before = store.getStats();
+    const job = sampleJob();
+    const findJob = raw.prepare('SELECT id FROM jobs WHERE id = ?');
+
+    assert.throws(() => store.recordJob(job), /prune failed/);
+    assert.strictEqual(findJob.get(job.jobId), undefined, 'failed request left a job row behind');
+    assert.deepStrictEqual(store.getStats(), before);
+
+    raw.exec('DROP TRIGGER fail_prune');
+    store.recordJob(job);
+    assert.ok(findJob.get(job.jobId));
+    assert.strictEqual(store.getStats().jobs, before.jobs + 1);
+    assert.strictEqual(raw.prepare('SELECT COUNT(*) AS count FROM jobs').get().count, 10000);
+    assert.ok(store.shareJob(job.jobId).shareId);
+  } finally {
+    raw.close();
+    store.close();
+    fs.rmSync(path.dirname(file), { recursive: true, force: true });
+  }
+});
 ok('oversized results are refused for sharing', () => {
   const s = createStore({ file: ':memory:' });
   const job = sampleJob({ compressed: 'x'.repeat(SHARE_MAX_CHARS + 1) });
