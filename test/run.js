@@ -195,6 +195,69 @@ function sampleJob(over) {
     compressed: 'Acme revenue grew.', ...over,
   };
 }
+ok('job store worker rejects unfinished calls and reopens without retrying writes', async () => {
+  const { EventEmitter } = require('node:events');
+  const { createJobStoreClient } = require('../server/lib/job-store-worker');
+  const workers = [];
+  const client = createJobStoreClient((options) => {
+    const thread = new EventEmitter();
+    thread.options = options;
+    thread.messages = [];
+    thread.postMessage = (msg) => { thread.messages.push(msg); };
+    thread.terminate = async () => { thread.emit('exit', 0); };
+    workers.push(thread);
+    return thread;
+  });
+
+  const first = client.request('recordJobAsync', sampleJob());
+  const read = client.request('getStats');
+  const lost = Promise.all([
+    assert.rejects(first, /worker interrupted/),
+    assert.rejects(read, /worker interrupted/),
+  ]);
+  const [initial] = workers;
+  initial.emit('error', new Error('worker interrupted'));
+  await lost;
+  await assert.rejects(client.request('getStats'), /worker interrupted/);
+  assert.strictEqual(workers.length, 1);
+  assert.strictEqual(initial.options.allowMemoryFallback, true);
+
+  initial.emit('exit', 1);
+  const recovered = client.request('getStats');
+  const [, next] = workers;
+  assert.strictEqual(next.options.allowMemoryFallback, false);
+  assert.deepStrictEqual(next.messages.map((m) => m.operation), ['getStats']);
+  next.emit('message', { id: next.messages[0].id, result: { jobs: 1 } });
+  assert.deepStrictEqual(await recovered, { jobs: 1 });
+
+  const close = client.close();
+  await assert.rejects(client.request('getStats'), /client is closed/);
+  assert.strictEqual(next.messages[1].operation, 'close');
+  next.emit('message', { id: next.messages[1].id });
+  await close;
+});
+
+ok('job store worker timeout rejects outstanding operations then terminates', async () => {
+  const { EventEmitter } = require('node:events');
+  const { createJobStoreClient } = require('../server/lib/job-store-worker');
+  let stopped = false;
+  const client = createJobStoreClient(() => {
+    const thread = new EventEmitter();
+    thread.postMessage = () => {};
+    thread.terminate = async () => { stopped = true; thread.emit('exit', 0); };
+    return thread;
+  }, 5);
+  await assert.rejects(client.request('getStats'), /did not reply in time/);
+  assert.ok(stopped);
+  await client.close();
+});
+
+ok('store recovery refuses to create a new ledger when the original file is missing', () => {
+  const file = tmpDb();
+  assert.throws(() => createStore({ file, allowMemoryFallback: false }), { code: 'ENOENT' });
+  assert.strictEqual(fs.existsSync(file), false);
+});
+
 ok('batched jobs commit together while a failed job leaves no changes', async () => {
   const s = createStore({ file: ':memory:' });
   try {

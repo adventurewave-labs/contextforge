@@ -23,8 +23,8 @@ const PENDING_TTL_MS = 60 * 60 * 1000;
 const MAX_UNSHARED_ROWS = 10_000; // metadata rows kept for unshared jobs
 const SHARE_MAX = Math.max(1, Number(process.env.SHARE_MAX) || 10_000); // oldest shares expire first
 const PRUNE_EVERY = 100;
-const MAX_WRITE_BATCH = 32;
-const WRITE_BATCH_DELAY_MS = 10;
+const MAX_WRITE_BATCH = 16;
+const WRITE_BATCH_DELAY_MS = 5;
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS jobs (
@@ -65,9 +65,12 @@ function defaultDbFile() {
   return path.join(__dirname, '..', '..', 'data', 'contextforge.db');
 }
 
-function openDb(file) {
+function openDb(file, requireExisting = false) {
   const { DatabaseSync } = require('node:sqlite');
-  if (file !== ':memory:') fs.mkdirSync(path.dirname(file), { recursive: true });
+  if (file !== ':memory:') {
+    if (requireExisting) fs.statSync(file);
+    else fs.mkdirSync(path.dirname(file), { recursive: true });
+  }
   const db = new DatabaseSync(file);
   try {
     db.exec('PRAGMA busy_timeout = 2000; PRAGMA synchronous = FULL;');
@@ -109,12 +112,13 @@ function prepareStatements(db) {
   };
 }
 
-function createStore({ file = defaultDbFile(), shareMax = SHARE_MAX } = {}) {
+function createStore({ file = defaultDbFile(), shareMax = SHARE_MAX, allowMemoryFallback = true } = {}) {
   let db;
   let storage = 'sqlite';
   try {
-    db = openDb(file);
+    db = openDb(file, !allowMemoryFallback);
   } catch (err) {
+    if (!allowMemoryFallback) throw err;
     // Never silent: log loudly and report storage:'memory' in /api/stats.
     console.error(JSON.stringify({
       ts: new Date().toISOString(), msg: 'store', level: 'warn',
@@ -172,7 +176,7 @@ function createStore({ file = defaultDbFile(), shareMax = SHARE_MAX } = {}) {
     } else {
       db?.close();
       db = null;
-      db = openDb(file);
+      db = openDb(file, true);
       q = prepareStatements(db);
     }
     reopenRequired = false;
