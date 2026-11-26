@@ -206,7 +206,7 @@ unless you enable the LLM engine.
 ## Tests
 
 ```bash
-npm test    # 34 unit tests + 40 HTTP integration checks, zero dependencies
+npm test    # 35 unit tests + 40 HTTP integration checks, zero dependencies
 ```
 
 ---
