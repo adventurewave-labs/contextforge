@@ -5,20 +5,20 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>ContextForge — forge lean LLM contexts</title>
 <meta name="description" content="Compress giant prompts up to 20x and verify nothing important was lost. Open source, self-hostable.">
-<link rel="icon" href="favicon.svg?v=1.0.0" type="image/svg+xml">
+<link rel="icon" href="favicon.svg?v=1.1.0" type="image/svg+xml">
 <meta property="og:title" content="ContextForge — forge lean LLM contexts">
 <meta property="og:description" content="Compress giant prompts up to 20x and verify nothing important was lost. Free, open source, self-hostable.">
 <meta property="og:type" content="website">
-<meta property="og:image" content="/logo.svg?v=1.0.0">
+<meta property="og:image" content="/logo.svg?v=1.1.0">
 <meta name="twitter:card" content="summary">
 <meta name="twitter:title" content="ContextForge — forge lean LLM contexts">
 <meta name="twitter:description" content="Compress giant prompts up to 20x and verify nothing important was lost.">
-<link rel="stylesheet" href="style.css?v=1.0.0">
+<link rel="stylesheet" href="style.css?v=1.1.0">
 </head>
 <body>
 <noscript><div style="background:#fbbf24;color:#161003;padding:12px 16px;text-align:center;font:600 14px system-ui,sans-serif">ContextForge needs JavaScript for the interactive forge. The HTTP API works without it — see the README.</div></noscript>
 <header>
-  <img src="logo.svg?v=1.0.0" alt="ContextForge logo" class="logo">
+  <img src="logo.svg?v=1.1.0" alt="ContextForge logo" class="logo">
   <div>
     <h1>ContextForge</h1>
     <p class="tagline">Forge lean LLM contexts. Keep every fact.</p>
@@ -89,12 +89,26 @@
       <h2>What you'd save per call</h2>
       <div id="savingsRows"></div>
     </div>
+
+    <div class="card share">
+      <h2>Share this result</h2>
+      <p class="hint" id="shareNote">Creates a read-only link to the forged context, metrics and faithfulness report. <strong>The page is publicly reachable by anyone with the URL.</strong> Your original context is never stored.</p>
+      <div class="row actions">
+        <button id="share" class="ghost" aria-label="Create a public share link">Create share link</button>
+        <button id="delete" class="ghost danger" aria-label="Delete this job and its share link">Delete job</button>
+      </div>
+      <div class="row hidden" id="shareOut">
+        <input type="text" id="shareUrl" readonly aria-label="Public share link">
+        <button id="copyShare" class="ghost">Copy link</button>
+      </div>
+      <p class="hint" id="shareStatus" role="status"></p>
+    </div>
   </div>
 </section>
 
 <section id="how" class="how card">
   <h2>How it works</h2>
-  <img src="assets/workflow.svg?v=1.0.0" alt="ContextForge workflow: raw context in, compression engine, faithfulness verification, forged context out">
+  <img src="assets/workflow.svg?v=1.1.0" alt="ContextForge workflow: raw context in, compression engine, faithfulness verification, forged context out">
   <div class="cols">
     <div>
       <h3>1 · Score</h3>
@@ -116,6 +130,6 @@
   <p class="hint">Built by <a href="https://github.com/adventurewave-labs" target="_blank" rel="noopener">Adventurewave Labs</a> · zero-dependency Node · deploy to Railway in one click · MIT license.</p>
 </footer>
 </main>
-<script src="app.js?v=1.0.0"></script>
+<script src="app.js?v=1.1.0"></script>
 </body>
 </html>

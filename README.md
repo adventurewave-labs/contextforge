@@ -10,9 +10,10 @@ size, and **proves nothing important was lost** before you ship them.
 
 - ⚡ **3–20× smaller contexts** — deterministic extractive engine, free and offline
 - 🛡️ **Faithfulness verification** — every number, date, URL, email and name is checked; anything dropped is flagged by severity
-- 💸 **Savings ledger** — live per-call dollar savings computed against current model pricing
+- 💸 **Savings ledger** — live per-call dollar savings computed against current model pricing; lifetime totals persist across restarts (SQLite)
+- 🔗 **Shareable results** — publish a read-only, public-by-URL link to a forged context + its faithfulness report; delete revokes it
 - 🤖 **Optional LLM engine** — bring your own OpenRouter key for LLM-grade compression; falls back to extractive automatically
-- 📦 **Zero dependencies** — pure Node ≥18, single container, one-command Railway deploy
+- 📦 **Zero dependencies** — pure Node ≥22.13 (built-in `node:sqlite`), single container, one-command Railway deploy
 
 ---
 
@@ -79,6 +80,11 @@ npm start
 2. In Railway: **New Project → Deploy from GitHub repo**.
 3. Done — `railway.json` configures the Dockerfile build and `/health` check.
    Optionally set `OPENROUTER_API_KEY` as a service variable.
+4. For stats and share links to survive **deploys**, attach a volume to the
+   service (any mount path — the store follows `RAILWAY_VOLUME_MOUNT_PATH`).
+   Railway mounts volumes as root while the image runs as `node`, so also set
+   `RAILWAY_RUN_UID=0`. Without a volume the container filesystem is replaced
+   on every deploy and the ledger and links reset with it.
 
 Or with the CLI:
 
@@ -112,7 +118,9 @@ railway init && railway up
   "method": "extractive",
   "elapsedMs": 6,
   "fallbackReason": null,
-  "compressed": "Acme Corp reported revenue of $18.4 million…"
+  "compressed": "Acme Corp reported revenue of $18.4 million…",
+  "verify": { "score": 93, "factsTotal": 14, "factsKept": 13, "missing": [] },
+  "shareable": true
 }
 ```
 
@@ -140,9 +148,24 @@ railway init && railway up
 Score is severity-weighted: dropping a date or dollar figure hurts more than
 dropping a passing mention of a name.
 
+### `POST /api/jobs/:jobId/share` · `DELETE /api/jobs/:jobId` · `GET /r/:shareId`
+
+`share` publishes the job's forged context, metrics and faithfulness report at
+`/r/<shareId>` (read-only, no re-run) and returns `{ "shareId", "url", "public": true }`.
+**Share pages are public to anyone holding the URL** (128-bit random id,
+`noindex`, `no-store`). The `jobId` is the delete capability — it is returned
+only to whoever ran the job and never appears on the share page.
+`DELETE` hard-deletes the job row; its link 404s immediately.
+
+Share errors: `404` unknown job · `410` result no longer held (unshared results
+are kept in memory only, max 100 for 1h — restart or expiry means re-run) ·
+`413` result over 200,000 characters.
+
 ### `GET /api/models` · `GET /api/stats` · `GET /health`
 
-Model catalog with live pricing snapshot · lifetime forge stats · healthcheck.
+Model catalog with live pricing snapshot · lifetime forge stats
+(`storage: "sqlite"` when persisted, `"memory"` when the database could not be
+opened — logged at boot) · healthcheck.
 
 ---
 
@@ -172,22 +195,25 @@ unless you enable the LLM engine.
 - **Sentence granularity, order preserved.** Forged context stays readable and
   stays in narrative order — models handle ordered, coherent context better
   than shuffled fragments.
-- **Ephemeral by design.** No database, no stored prompts. Stats are anonymous
-  counters. Your context leaves memory when the request ends.
+- **Originals are never stored.** Every job writes an anonymous metadata row
+  (token counts, scores, engine) and bumps lifetime counters in SQLite. The
+  forged text and missing-fact list reach disk only when you press **Share**;
+  until then they sit in a small bounded in-memory map. Deleting a job
+  hard-deletes its row without rewinding the lifetime ledger.
 
 ---
 
 ## Tests
 
 ```bash
-npm test    # 28 tests, zero dependencies
+npm test    # 34 unit tests + 40 HTTP integration checks, zero dependencies
 ```
 
 ---
 
 ## Roadmap
 
-- [ ] SQLite persistence + shareable result links
+- [x] SQLite persistence + shareable result links (v1.1)
 - [ ] Token-level LLMLingua-style compression behind the same API
 - [ ] Team savings ledgers + CSV export
 - [ ] Drop-in OpenAI-compatible proxy that forges context transparently
@@ -221,6 +247,8 @@ snapshot from the OpenRouter catalog (2026-10-12).
 | `RATE_LIMIT_MAX` | `40` | Requests/min/IP (hard-capped at 10,000) |
 | `CORS_ORIGINS` | – | Comma-separated strict allowlist, e.g. `https://app.example.com`; unset = no CORS headers |
 | `SHUTDOWN_GRACE_MS` | `10000` | SIGTERM drain window before forced close |
+| `CONTEXTFORGE_DB` | `$RAILWAY_VOLUME_MOUNT_PATH/contextforge.db`, else `./data/contextforge.db` | SQLite file for stats + shares; `:memory:` for ephemeral |
+| `SHARE_MAX` | `10000` | Max live share links; beyond it the oldest expire first |
 
 ### Health & monitoring
 

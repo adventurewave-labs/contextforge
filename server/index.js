@@ -10,7 +10,7 @@ const { compressContext } = require('./lib/compress');
 const { verifyFaithfulness } = require('./lib/verify');
 const { estimateTokens } = require('./lib/tokens');
 const { catalog } = require('./lib/models');
-const { recordJob, getStats } = require('./lib/store');
+const { recordJob, getStats, shareJob, getShare, deleteJob, closeStore, SHARE_MAX_CHARS } = require('./lib/store');
 const pkg = require('../package.json');
 
 const PORT = process.env.PORT || 3000;
@@ -30,7 +30,7 @@ function corsHeaders(req) {
   if (!origin || !CORS_ORIGINS.length || !CORS_ORIGINS.includes(origin)) return {};
   return {
     'Access-Control-Allow-Origin': origin,
-    'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+    'Access-Control-Allow-Methods': 'GET, POST, DELETE, OPTIONS',
     'Access-Control-Allow-Headers': 'Content-Type, X-Request-ID',
     'Access-Control-Max-Age': '86400',
     Vary: 'Origin',
@@ -162,7 +162,7 @@ const MIME = {
   '.txt': 'text/plain; charset=utf-8',
 };
 
-function notFoundPage(res) {
+function notFoundPage(res, headers) {
   const html = '<!doctype html><html lang="en"><head><meta charset="utf-8">' +
     '<meta name="viewport" content="width=device-width, initial-scale=1">' +
     '<title>404 · ContextForge</title>' +
@@ -172,7 +172,7 @@ function notFoundPage(res) {
     '<h1 style="font-size:56px;margin:0">404</h1>' +
     '<p>Nothing forged here.</p>' +
     '<p><a href="/">← back to the forge</a></p></div></body></html>';
-  send(res, 404, html);
+  send(res, 404, html, headers);
 }
 
 function serveStatic(req, res, urlPath) {
@@ -207,7 +207,7 @@ function openapi() {
     openapi: '3.0.3',
     info: {
       title: 'ContextForge',
-      version: '1.0.0',
+      version: pkg.version,
       description: 'Prompt compression with faithfulness verification.',
       license: { name: 'MIT', url: 'https://github.com/adventurewave-labs/contextforge/blob/main/LICENSE' },
     },
@@ -215,7 +215,26 @@ function openapi() {
     paths: {
       '/health': { get: { summary: 'Health + stats', responses: { '200': { description: 'ok' } } } },
       '/api/models': { get: { summary: 'Model catalog with pricing snapshot', responses: { '200': { description: 'catalog' } } } },
-      '/api/stats': { get: { summary: 'Lifetime forge stats', responses: { '200': { description: 'stats' } } } },
+      '/api/stats': { get: { summary: 'Lifetime forge stats (persisted in SQLite; storage field reports sqlite|memory)', responses: { '200': { description: 'stats' } } } },
+      '/api/jobs/{jobId}/share': {
+        post: {
+          summary: 'Publish a job result at a public-by-URL /r/{shareId} page',
+          parameters: [{ name: 'jobId', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } }],
+          responses: {
+            '200': { description: '{ shareId, url, public }' },
+            '404': { description: 'Unknown job' },
+            '410': { description: 'Result no longer held in memory (restart or expiry); re-run to share' },
+            '413': { description: 'Result too large to share' },
+          },
+        },
+      },
+      '/api/jobs/{jobId}': {
+        delete: {
+          summary: 'Hard-delete a job and its share (the /r link 404s afterwards)',
+          parameters: [{ name: 'jobId', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } }],
+          responses: { '200': { description: '{ deleted: true }' }, '404': { description: 'Unknown job' } },
+        },
+      },
       '/api/openapi.json': { get: { summary: 'This document', responses: { '200': { description: 'OpenAPI spec' } } } },
       '/api/compress': {
         post: {
@@ -309,6 +328,8 @@ async function handleCompress(req, res) {
   const originalTokens = estimateTokens(context);
   const compressedTokens = estimateTokens(out.compressed);
   const jobId = crypto.randomUUID();
+  // Verified server-side so a shared result's score can't be forged by the client.
+  const verify = verifyFaithfulness(context, out.compressed);
 
   const job = {
     jobId,
@@ -321,9 +342,77 @@ async function handleCompress(req, res) {
     fallbackReason: out.fallbackReason || null,
     createdAt: new Date().toISOString(),
   };
-  recordJob(job);
+  recordJob({ ...job, engine, model: engine === 'llm' ? model || null : null, verify, compressed: out.compressed });
 
-  send(res, 200, { ...job, compressed: out.compressed });
+  send(res, 200, { ...job, compressed: out.compressed, verify, shareable: out.compressed.length <= SHARE_MAX_CHARS });
+}
+
+const SHARE_ERRORS = {
+  not_found: [404, 'job not found'],
+  expired: [410, 'result no longer held in memory — re-run the job to share it'],
+  too_large: [413, `result exceeds ${SHARE_MAX_CHARS} characters and cannot be shared`],
+};
+
+function handleShare(res, jobId) {
+  const r = shareJob(jobId);
+  if (r.error) {
+    const [status, error] = SHARE_ERRORS[r.error];
+    return send(res, status, { error });
+  }
+  send(res, 200, { shareId: r.shareId, url: `/r/${r.shareId}`, public: true });
+}
+
+function handleDelete(res, jobId) {
+  if (!deleteJob(jobId)) return send(res, 404, { error: 'job not found' });
+  send(res, 200, { deleted: true });
+}
+
+// --- shared result page (read-only, server-rendered: CSP allows no inline script/style) ---
+const escHtml = (s) => String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+const fmtNum = (n) => Number(n).toLocaleString('en-US');
+
+function scoreClass(score) {
+  if (score >= 90) return 'good';
+  if (score >= 70) return 'warn';
+  return 'bad';
+}
+
+function renderShare(res, shareId) {
+  const r = getShare(shareId);
+  // no-store: a deleted share must not linger in caches; noindex: public-by-URL is not public-by-search.
+  const headers = { 'Cache-Control': 'no-store', 'X-Robots-Tag': 'noindex, nofollow', 'Referrer-Policy': 'no-referrer' };
+  if (!r) return notFoundPage(res, headers);
+  const v = r.verify;
+  const missing = v && v.missing.length
+    ? '<div class="missing"><h3>Missing facts</h3><ul>' + v.missing.map((f) =>
+      `<li class="${f.severity === 'high' ? '' : f.severity === 'medium' ? 'med' : 'low'}">${escHtml(f.value)}<em>${escHtml(f.kind)}</em></li>`).join('') +
+      '</ul></div>'
+    : '';
+  const verifyCard = v
+    ? `<div class="card verify"><h2>Faithfulness <span class="score ${scoreClass(v.score)}">${v.score}</span></h2>` +
+      `<progress class="score-meter ${scoreClass(v.score)}" max="100" value="${v.score}">${v.score}%</progress>` +
+      `<p class="hint">${fmtNum(v.factsKept)} of ${fmtNum(v.factsTotal)} facts kept · numbers, dates, URLs, emails and names checked</p>${missing}</div>`
+    : '';
+  const html = '<!doctype html><html lang="en"><head><meta charset="utf-8">' +
+    '<meta name="viewport" content="width=device-width, initial-scale=1">' +
+    '<meta name="robots" content="noindex, nofollow">' +
+    '<title>Shared forge result · ContextForge</title>' +
+    `<link rel="icon" href="/favicon.svg?v=${pkg.version}" type="image/svg+xml">` +
+    `<link rel="stylesheet" href="/style.css?v=${pkg.version}"></head><body>` +
+    `<header><img src="/logo.svg?v=${pkg.version}" alt="ContextForge logo" class="logo">` +
+    '<div><h1>ContextForge</h1><p class="tagline">Shared forge result · read-only</p></div>' +
+    '<nav><a href="/">Forge your own</a></nav></header><main>' +
+    '<p class="hint share-note">This page is publicly reachable by anyone with the URL. The original context was never stored.</p>' +
+    '<div class="metrics">' +
+    `<div class="metric card"><span>${r.compression}x</span><label>compression</label></div>` +
+    `<div class="metric card"><span>${fmtNum(r.originalTokens)} → ${fmtNum(r.compressedTokens)}</span><label>tokens</label></div>` +
+    `<div class="metric card"><span>${fmtNum(r.elapsedMs)}ms</span><label>latency</label></div>` +
+    `<div class="metric card"><span>${r.method === 'llm' ? 'LLM' : 'extractive'}</span><label>engine</label></div>` +
+    '</div>' + verifyCard +
+    `<div class="card pane"><h2>Forged context <span class="hint">· forged ${escHtml(r.createdAt)}</span></h2>` +
+    `<textarea readonly spellcheck="false" aria-label="Forged compressed context">${escHtml(r.compressed)}</textarea></div>` +
+    '</main></body></html>';
+  send(res, 200, html, headers);
 }
 
 async function handleVerify(req, res) {
@@ -383,6 +472,12 @@ const server = http.createServer(async (req, res) => {
       if (url.pathname === '/api/stats' && req.method === 'GET') {
         return send(res, 200, getStats());
       }
+      const jobRoute = /^\/api\/jobs\/([0-9a-f-]{36})(\/share)?$/.exec(url.pathname);
+      if (jobRoute) {
+        if (jobRoute[2] && req.method === 'POST') return handleShare(res, jobRoute[1]);
+        if (!jobRoute[2] && req.method === 'DELETE') return handleDelete(res, jobRoute[1]);
+        return send(res, 405, { error: 'method not allowed' });
+      }
       if (req.method !== 'POST') return send(res, 405, { error: 'method not allowed' });
 
       if (url.pathname === '/api/compress') return await handleCompress(req, res);
@@ -393,6 +488,8 @@ const server = http.createServer(async (req, res) => {
       res.setHeader('Allow', 'GET, HEAD');
       return send(res, 405, '<!doctype html><p>method not allowed</p>');
     }
+    const shareRoute = /^\/r\/([A-Za-z0-9_-]{22})$/.exec(url.pathname);
+    if (shareRoute) return renderShare(res, shareRoute[1]);
     return serveStatic(req, res, url.pathname);
   } catch (err) {
     if (err && err.status) {
@@ -408,6 +505,7 @@ const server = http.createServer(async (req, res) => {
 });
 
 function start() {
+  getStats(); // open the store at boot so a storage fallback is logged before traffic
   return new Promise((resolve) => {
     server.listen(PORT, () => {
       console.log(`ContextForge listening on :${PORT}`);
@@ -437,7 +535,7 @@ function shutdown(signal) {
       if (typeof server.closeAllConnections === 'function') server.closeAllConnections();
       resolve();
     }, SHUTDOWN_GRACE_MS).unref();
-  });
+  }).then(() => closeStore());
 }
 
 if (require.main === module) {

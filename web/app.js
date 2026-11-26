@@ -3,6 +3,7 @@
 const $ = (id) => document.getElementById(id);
 const esc = (s) => s.replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const fmt = (n) => n.toLocaleString('en-US');
+let currentJob = null; // { jobId, shareable } of the result on screen
 
 // Embedded fallback catalog (server also exposes /api/health; catalog is static enough for UI)
 const TARGETS = [
@@ -97,13 +98,8 @@ async function forge() {
     $('mMethod').textContent = data.method === 'llm' ? 'LLM' : 'extractive';
     if (data.fallbackReason) $('outMeta').textContent += ` · ${data.fallbackReason}`;
 
-    // Verify faithfulness
-    const vres = await fetch('/api/verify', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ original: context, compressed: data.compressed }),
-    });
-    const v = await vres.json();
+    // Faithfulness is verified server-side with the job (shared pages reuse it).
+    const v = data.verify;
     $('score').textContent = `${v.score}`;
     $('score').style.color = ratioColor(v.score);
     $('scoreBar').style.width = `${v.score}%`;
@@ -113,6 +109,7 @@ async function forge() {
 
     renderMissing(v.missing);
     renderSavings(data.originalTokens, data.compressedTokens);
+    resetShare({ jobId: data.jobId, shareable: data.shareable });
     $('results').classList.remove('hidden');
     $('results').scrollIntoView({ behavior: 'smooth', block: 'nearest' });
     refreshStats();
@@ -123,12 +120,54 @@ async function forge() {
   }
 }
 
+function resetShare(job) {
+  currentJob = job;
+  $('shareOut').classList.add('hidden');
+  $('shareUrl').value = '';
+  $('share').disabled = !job.shareable;
+  $('delete').disabled = false;
+  $('shareStatus').textContent = job.shareable ? '' : 'This result is too large to share.';
+}
+
+async function share() {
+  if (!currentJob) return;
+  $('share').disabled = true;
+  try {
+    const res = await fetch(`/api/jobs/${currentJob.jobId}/share`, { method: 'POST' });
+    const body = await res.json();
+    if (!res.ok) throw new Error(body.error || res.status);
+    $('shareUrl').value = new URL(body.url, location.origin).href;
+    $('shareOut').classList.remove('hidden');
+    $('shareStatus').textContent = 'Link created — anyone with this URL can view it. Delete the job to revoke it.';
+  } catch (err) {
+    $('share').disabled = false;
+    $('shareStatus').textContent = 'Share failed: ' + err.message;
+  }
+}
+
+async function del() {
+  if (!currentJob) return;
+  if (!confirm('Delete this job? Any share link stops working immediately.')) return;
+  try {
+    const res = await fetch(`/api/jobs/${currentJob.jobId}`, { method: 'DELETE' });
+    if (!res.ok && res.status !== 404) throw new Error((await res.json()).error || res.status);
+    currentJob = null;
+    $('share').disabled = true;
+    $('delete').disabled = true;
+    $('shareOut').classList.add('hidden');
+    $('shareStatus').textContent = 'Job deleted. The share link (if any) now returns 404.';
+  } catch (err) {
+    $('shareStatus').textContent = 'Delete failed: ' + err.message;
+  }
+}
+
 async function refreshStats() {
   try {
     const res = await fetch('/api/stats');
     const s = await res.json();
     $('stats').textContent =
-      `${fmt(s.jobs)} contexts forged · ${fmt(s.tokensForged)} tokens burned away · est. $${s.estSavingsUsd.toFixed(2)} saved (vs $5/M input) · since ${new Date(s.startedAt).toLocaleString()}`;
+      `${fmt(s.jobs)} contexts forged · ${fmt(s.tokensForged)} tokens burned away · est. $${s.estSavingsUsd.toFixed(2)} saved (vs $5/M input) · since ${new Date(s.startedAt).toLocaleString()}` +
+      (s.storage === 'memory' ? ' · ephemeral storage (resets on restart)' : '');
   } catch { /* ignore */ }
 }
 
@@ -142,6 +181,15 @@ function bind() {
     }
   });
   $('forge').addEventListener('click', forge);
+  $('share').addEventListener('click', share);
+  $('delete').addEventListener('click', del);
+  $('copyShare').addEventListener('click', async () => {
+    try {
+      await navigator.clipboard.writeText($('shareUrl').value);
+      $('copyShare').textContent = 'Copied ✓';
+      setTimeout(() => ($('copyShare').textContent = 'Copy link'), 1500);
+    } catch { /* clipboard unavailable */ }
+  });
   $('sample').addEventListener('click', () => {
     $('input').value = SAMPLE;
     $('inMeta').textContent = '· sample loaded';

@@ -2,6 +2,18 @@
 
 All notable changes to ContextForge. Format: Keep a Changelog; versioning: SemVer.
 
+## [1.1.0] — 2026-11-26
+
+### Added
+- SQLite persistence via built-in `node:sqlite` (still zero npm dependencies): job metadata rows + lifetime counters survive restarts; `/api/stats` gains `storage` (`sqlite`|`memory`)
+- Shareable result links: `POST /api/jobs/:id/share` → public-by-URL read-only `/r/:shareId` page (metrics, faithfulness score, missing facts, forged text); `DELETE /api/jobs/:id` hard-deletes and the link 404s
+- UI share card with a public-by-URL warning, copy-link and delete buttons
+- `/api/compress` now returns server-side `verify` and `shareable` (the UI no longer makes a second `/api/verify` call)
+
+### Changed
+- Node engine floor raised to ≥22.13 (`node:sqlite`); Dockerfile prepares a node-owned `/app/data`
+- Originals are still never stored; forged text reaches disk only when shared
+
 ## [1.0.0] — 2026-10-12
 
 ### Added (initial release)
