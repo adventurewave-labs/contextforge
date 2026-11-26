@@ -154,19 +154,36 @@ function createStore({ file = defaultDbFile(), shareMax = SHARE_MAX } = {}) {
   }
 
   // -> { shareId } | { error: 'not_found' | 'expired' | 'too_large' }
+  // Read-check-write runs under one write lock (BEGIN IMMEDIATE), so another
+  // process on the same file can't interleave; a failed prune rolls the share
+  // back and the result stays pending, so no link exists that nobody was given.
   function shareJob(jobId) {
-    const row = q.byId.get(jobId);
-    if (!row) return { error: 'not_found' };
-    if (row.share_id) return { shareId: row.share_id };
     sweepPending();
-    const p = pending.get(jobId);
-    if (!p) return { error: 'expired' };
-    if (p.tooLarge) return { error: 'too_large' };
-    const shareId = crypto.randomBytes(16).toString('base64url');
-    q.share.run(shareId, new Date().toISOString(), p.compressed, JSON.stringify(p.missing), jobId);
-    pending.delete(jobId);
-    q.pruneShares.run(shareMax);
-    return { shareId };
+    db.exec('BEGIN IMMEDIATE');
+    let result;
+    try {
+      const row = q.byId.get(jobId);
+      const p = pending.get(jobId);
+      if (!row) result = { error: 'not_found' };
+      else if (row.share_id) result = { shareId: row.share_id };
+      else if (!p) result = { error: 'expired' };
+      else if (p.tooLarge) result = { error: 'too_large' };
+      else {
+        const shareId = crypto.randomBytes(16).toString('base64url');
+        q.share.run(shareId, new Date().toISOString(), p.compressed, JSON.stringify(p.missing), jobId);
+        q.pruneShares.run(shareMax);
+        result = { shareId, created: true };
+      }
+      db.exec('COMMIT');
+    } catch (err) {
+      db.exec('ROLLBACK');
+      throw err;
+    }
+    if (result.created) {
+      pending.delete(jobId);
+      return { shareId: result.shareId };
+    }
+    return result;
   }
 
   function getShare(shareId) {

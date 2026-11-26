@@ -247,6 +247,33 @@ ok('share cap expires oldest first and never the share just created', () => {
   assert.deepStrictEqual(ids.map((id) => !!s.getShare(id)), [false, false, false, true, true]);
   s.close();
 });
+ok('a second process on the same file sees the stored share id', () => {
+  const file = tmpDb();
+  const a = createStore({ file });
+  const b = createStore({ file }); // stands in for a second server process
+  const job = sampleJob();
+  a.recordJob(job);
+  assert.strictEqual(b.shareJob(job.jobId).error, 'expired', 'b never held the result');
+  const won = a.shareJob(job.jobId);
+  assert.deepStrictEqual(b.shareJob(job.jobId), won);
+  assert.ok(b.getShare(won.shareId));
+  a.close(); b.close();
+});
+ok('a failing prune rolls the share back and keeps the result pending', () => {
+  const file = tmpDb();
+  const s = createStore({ file, shareMax: 'not-a-number' }); // text LIMIT -> SQLite datatype error
+  const job = sampleJob();
+  s.recordJob(job);
+  assert.throws(() => s.shareJob(job.jobId));
+  const { DatabaseSync } = require('node:sqlite');
+  const raw = new DatabaseSync(file);
+  const row = raw.prepare('SELECT share_id, compressed FROM jobs WHERE id = ?').get(job.jobId);
+  raw.close();
+  assert.strictEqual(row.share_id, null, 'share survived a failed prune');
+  assert.strictEqual(row.compressed, null);
+  assert.throws(() => s.shareJob(job.jobId), 'result should still be pending (retry hits prune again, not expired)');
+  s.close();
+});
 ok('oversized results are refused for sharing', () => {
   const s = createStore({ file: ':memory:' });
   const job = sampleJob({ compressed: 'x'.repeat(SHARE_MAX_CHARS + 1) });
