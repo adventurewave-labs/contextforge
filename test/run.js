@@ -3,6 +3,12 @@
 // Zero-dependency test runner: node test/run.js
 
 const assert = require('assert');
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
+
+// Keep the process-wide store (and anything this suite spawns) off disk.
+process.env.CONTEXTFORGE_DB = ':memory:';
 const { compressContext, extractiveCompress, splitSentences } = require('../server/lib/compress');
 const { verifyFaithfulness } = require('../server/lib/verify');
 const { estimateTokens } = require('../server/lib/tokens');
@@ -175,6 +181,140 @@ ok('job log is capped at 500 entries under churn', () => {
   const after = getStats();
   assert.strictEqual(after.jobs, before + 600); // lifetime stats unbounded by design (counters)
   assert.ok(after.tokensForged >= 3000);
+});
+
+console.log('persistence & shares (node:sqlite)');
+const { createStore, SHARE_MAX_CHARS } = require('../server/lib/store');
+const tmpDb = () => path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'cf-store-')), 'cf.db');
+const UUID = () => require('crypto').randomUUID();
+function sampleJob(over) {
+  return {
+    jobId: UUID(), engine: 'extractive', method: 'extractive', originalTokens: 100, compressedTokens: 30,
+    ratio: 0.3, compression: 3.33, elapsedMs: 4, createdAt: new Date().toISOString(),
+    verify: { score: 88, factsTotal: 9, factsKept: 8, missing: [{ value: '$18.4 million', kind: 'money', severity: 'high' }] },
+    compressed: 'Acme revenue grew.', ...over,
+  };
+}
+ok('share round-trips compressed text, metrics and missing facts', () => {
+  const s = createStore({ file: ':memory:' });
+  const job = sampleJob();
+  s.recordJob(job);
+  const r = s.shareJob(job.jobId);
+  assert.ok(/^[A-Za-z0-9_-]{22}$/.test(r.shareId), `bad shareId ${r.shareId}`);
+  assert.deepStrictEqual(s.shareJob(job.jobId), r, 'share must be idempotent');
+  const got = s.getShare(r.shareId);
+  assert.strictEqual(got.compressed, 'Acme revenue grew.');
+  assert.strictEqual(got.verify.score, 88);
+  assert.strictEqual(got.verify.missing[0].value, '$18.4 million');
+  assert.strictEqual(got.originalTokens, 100);
+  s.close();
+});
+ok('delete hard-deletes the share but never rewinds lifetime stats', () => {
+  const s = createStore({ file: ':memory:' });
+  const job = sampleJob();
+  s.recordJob(job);
+  const { shareId } = s.shareJob(job.jobId);
+  const before = s.getStats();
+  assert.strictEqual(s.deleteJob(job.jobId), true);
+  assert.strictEqual(s.getShare(shareId), null);
+  assert.strictEqual(s.deleteJob(job.jobId), false);
+  assert.strictEqual(s.shareJob(job.jobId).error, 'not_found');
+  assert.deepStrictEqual(s.getStats(), before);
+  s.close();
+});
+ok('unshared content is never written to disk; restart means re-run to share', () => {
+  const file = tmpDb();
+  const s1 = createStore({ file });
+  const job = sampleJob({ compressed: 'SECRET-MARKER-unshared' });
+  s1.recordJob(job);
+  s1.close();
+  assert.ok(!fs.readFileSync(file).includes('SECRET-MARKER-unshared'), 'unshared text reached disk');
+  const s2 = createStore({ file });
+  assert.strictEqual(s2.shareJob(job.jobId).error, 'expired');
+  assert.strictEqual(s2.shareJob(UUID()).error, 'not_found');
+  s2.close();
+});
+ok('share cap expires oldest first and never the share just created', () => {
+  const s = createStore({ file: ':memory:', shareMax: 2 });
+  const ids = [];
+  for (let i = 0; i < 5; i++) { // same-millisecond shares: ordering must not tie
+    const job = sampleJob();
+    s.recordJob(job);
+    const { shareId } = s.shareJob(job.jobId);
+    assert.ok(s.getShare(shareId), `share ${i} pruned on creation`);
+    ids.push(shareId);
+  }
+  assert.deepStrictEqual(ids.map((id) => !!s.getShare(id)), [false, false, false, true, true]);
+  s.close();
+});
+ok('a second process on the same file sees the stored share id', () => {
+  const file = tmpDb();
+  const a = createStore({ file });
+  const b = createStore({ file }); // stands in for a second server process
+  const job = sampleJob();
+  a.recordJob(job);
+  assert.strictEqual(b.shareJob(job.jobId).error, 'expired', 'b never held the result');
+  const won = a.shareJob(job.jobId);
+  assert.deepStrictEqual(b.shareJob(job.jobId), won);
+  assert.ok(b.getShare(won.shareId));
+  a.close(); b.close();
+});
+ok('a failing prune rolls the share back and keeps the result pending', () => {
+  const file = tmpDb();
+  const s = createStore({ file, shareMax: 'not-a-number' }); // text LIMIT -> SQLite datatype error
+  const job = sampleJob();
+  s.recordJob(job);
+  assert.throws(() => s.shareJob(job.jobId));
+  const { DatabaseSync } = require('node:sqlite');
+  const raw = new DatabaseSync(file);
+  const row = raw.prepare('SELECT share_id, compressed FROM jobs WHERE id = ?').get(job.jobId);
+  raw.close();
+  assert.strictEqual(row.share_id, null, 'share survived a failed prune');
+  assert.strictEqual(row.compressed, null);
+  assert.throws(() => s.shareJob(job.jobId), 'result should still be pending (retry hits prune again, not expired)');
+  s.close();
+});
+ok('oversized results are refused for sharing', () => {
+  const s = createStore({ file: ':memory:' });
+  const job = sampleJob({ compressed: 'x'.repeat(SHARE_MAX_CHARS + 1) });
+  s.recordJob(job);
+  assert.strictEqual(s.shareJob(job.jobId).error, 'too_large');
+  s.close();
+});
+ok('stats and shares survive a restart on the same database file', () => {
+  const file = tmpDb();
+  const s1 = createStore({ file });
+  assert.strictEqual(s1.storage, 'sqlite');
+  const a = sampleJob();
+  s1.recordJob(a);
+  s1.recordJob(sampleJob({ method: 'llm', engine: 'llm', originalTokens: 1000, compressedTokens: 100 }));
+  const { shareId } = s1.shareJob(a.jobId);
+  const stats1 = s1.getStats();
+  s1.close();
+  const s2 = createStore({ file });
+  const stats2 = s2.getStats();
+  assert.deepStrictEqual(stats2, stats1);
+  assert.strictEqual(stats2.jobs, 2);
+  assert.deepStrictEqual(stats2.byMethod, { extractive: 1, llm: 1 });
+  assert.strictEqual(stats2.tokensForged, 970);
+  assert.strictEqual(s2.getShare(shareId).compressed, 'Acme revenue grew.');
+  s2.close();
+});
+ok('unopenable database path falls back to memory and says so', () => {
+  const blocker = tmpDb(); // a regular file standing where a directory must go
+  fs.writeFileSync(blocker, 'not a dir');
+  const origErr = console.error;
+  let warned = '';
+  console.error = (m) => { warned += m; };
+  try {
+    const s = createStore({ file: path.join(blocker, 'sub', 'cf.db') });
+    assert.strictEqual(s.storage, 'memory');
+    assert.strictEqual(s.getStats().storage, 'memory');
+    s.close();
+  } finally {
+    console.error = origErr;
+  }
+  assert.match(warned, /falling back to in-memory/);
 });
 
 console.log('engine routing');

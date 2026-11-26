@@ -1,6 +1,6 @@
 {
   "name": "contextforge",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Prompt compression & faithfulness verification — forge lean LLM contexts without losing facts.",
   "main": "server/index.js",
   "scripts": {
@@ -8,7 +8,7 @@
     "test": "node test/run.js"
   },
   "engines": {
-    "node": ">=18"
+    "node": ">=22.13"
   },
   "license": "MIT",
   "repository": {

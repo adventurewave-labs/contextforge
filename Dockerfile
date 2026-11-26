@@ -15,6 +15,10 @@ COPY package.json ./
 COPY server ./server
 COPY web ./web
 
+# SQLite (node:sqlite, built in) lives here. Railway: attach a volume and the
+# store follows RAILWAY_VOLUME_MOUNT_PATH automatically (see README).
+RUN mkdir -p /app/data && chown node:node /app/data
+
 ENV NODE_ENV=production
 EXPOSE 3000
 

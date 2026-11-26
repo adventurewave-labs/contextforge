@@ -7,6 +7,8 @@
 const assert = require('assert');
 const { spawn } = require('child_process');
 const path = require('path');
+const fs = require('fs');
+const os = require('os');
 
 const PORT = 3900 + Math.floor(Math.random() * 200);
 const BASE = `http://127.0.0.1:${PORT}`;
@@ -51,11 +53,137 @@ async function waitUp(child, out) {
   throw new Error('server did not come up within 6s');
 }
 
+function spawnServer(port, extraEnv) {
+  return spawn(process.execPath, [path.join(__dirname, '..', 'server', 'index.js')], {
+    env: { ...process.env, PORT: String(port), ...extraEnv },
+    stdio: ['ignore', 'ignore', 'inherit'],
+  });
+}
+
+function stopServer(child) {
+  return new Promise((resolve) => {
+    if (child.exitCode !== null) return resolve();
+    child.once('exit', () => resolve());
+    child.kill('SIGTERM');
+  });
+}
+
+// Persistence + share links: two server lifetimes over one SQLite file, on
+// their own port (fresh rate-limit window) so the main suite's budget is untouched.
+async function persistenceSuite() {
+  const port = PORT + 300;
+  const base = `http://127.0.0.1:${port}`;
+  const db = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'cf-http-')), 'cf.db');
+  const call = async (method, p, body) => {
+    const res = await fetch(base + p, {
+      method,
+      headers: body ? { 'Content-Type': 'application/json' } : {},
+      body: body ? JSON.stringify(body) : undefined,
+    });
+    const text = await res.text();
+    let json = null;
+    try { json = JSON.parse(text); } catch (_) { /* html */ }
+    return { res, text, json };
+  };
+  const up = async (child) => {
+    for (let i = 0; i < 60; i++) {
+      if (child.exitCode !== null) throw new Error('persistence server exited early');
+      await new Promise((r) => setTimeout(r, 100));
+      try { if ((await fetch(`${base}/health`)).ok) return; } catch (_) { /* not yet */ }
+    }
+    throw new Error('persistence server did not come up');
+  };
+
+  console.log('http · persistence & share links');
+  let child = spawnServer(port, { CONTEXTFORGE_DB: db });
+  let job;
+  let shareUrl;
+  let statsBefore;
+  try {
+    await up(child);
+    await ok('compress returns server-side verify + shareable flag', async () => {
+      const { res, json } = await call('POST', '/api/compress', {
+        context: 'Renewal on 2026-11-01 for <script>alert(1)</script> Acme at $18.4 million. ' +
+          'Filler sentence one says nothing at all. Filler sentence two says nothing either. Contact maya@acme.example.com.',
+        targetRatio: 0.9,
+      });
+      assert.strictEqual(res.status, 200);
+      assert.strictEqual(typeof json.verify.score, 'number');
+      assert.ok(Array.isArray(json.verify.missing));
+      assert.strictEqual(json.shareable, true);
+      job = json;
+    });
+    await ok('stats report sqlite storage', async () => {
+      const { json } = await call('GET', '/api/stats');
+      assert.strictEqual(json.storage, 'sqlite');
+      assert.ok(json.jobs >= 1);
+      statsBefore = json;
+    });
+    await ok('POST /api/jobs/:id/share returns a public /r/ link', async () => {
+      const { res, json } = await call('POST', `/api/jobs/${job.jobId}/share`);
+      assert.strictEqual(res.status, 200);
+      assert.match(json.url, /^\/r\/[A-Za-z0-9_-]{22}$/);
+      assert.strictEqual(json.public, true);
+      shareUrl = json.url;
+      const again = await call('POST', `/api/jobs/${job.jobId}/share`);
+      assert.strictEqual(again.json.url, shareUrl, 'share must be idempotent');
+    });
+    await ok('share page renders read-only result with escaping + noindex/no-store', async () => {
+      const { res, text } = await call('GET', shareUrl);
+      assert.strictEqual(res.status, 200);
+      assert.match(res.headers.get('content-type'), /text\/html/);
+      assert.strictEqual(res.headers.get('cache-control'), 'no-store');
+      assert.match(res.headers.get('x-robots-tag'), /noindex/);
+      assert.ok(text.includes('publicly reachable'), 'missing public-by-URL notice');
+      assert.ok(text.includes(`>${job.verify.score}<`), 'missing verify score');
+      assert.ok(!text.includes('<script>alert(1)</script>'), 'compressed text not escaped');
+      assert.ok(text.includes('&lt;script&gt;'), 'compressed text missing');
+    });
+    await ok('share/delete error paths: unknown job 404, wrong method 405, bad share id 404', async () => {
+      const unknown = '00000000-0000-4000-8000-000000000000';
+      assert.strictEqual((await call('POST', `/api/jobs/${unknown}/share`)).res.status, 404);
+      assert.strictEqual((await call('DELETE', `/api/jobs/${unknown}`)).res.status, 404);
+      assert.strictEqual((await call('GET', `/api/jobs/${job.jobId}`)).res.status, 405);
+      assert.strictEqual((await call('GET', '/r/AAAAAAAAAAAAAAAAAAAAAA')).res.status, 404);
+      assert.strictEqual((await call('GET', '/r/not-a-share-id')).res.status, 404);
+    });
+  } finally {
+    await stopServer(child);
+  }
+
+  child = spawnServer(port, { CONTEXTFORGE_DB: db });
+  try {
+    await up(child);
+    await ok('restart: lifetime stats intact', async () => {
+      const { json } = await call('GET', '/api/stats');
+      assert.ok(statsBefore, 'no baseline stats');
+      for (const k of ['jobs', 'tokensIn', 'tokensOut', 'tokensForged', 'estSavingsUsd', 'startedAt']) {
+        assert.deepStrictEqual(json[k], statsBefore[k], `${k} changed across restart`);
+      }
+    });
+    await ok('restart: share link still renders without a re-run', async () => {
+      const { res } = await call('GET', shareUrl);
+      assert.strictEqual(res.status, 200);
+    });
+    await ok('delete hard-deletes: link 404s afterwards, stats unchanged', async () => {
+      const del = await call('DELETE', `/api/jobs/${job.jobId}`);
+      assert.strictEqual(del.res.status, 200);
+      assert.strictEqual(del.json.deleted, true);
+      const gone = await call('GET', shareUrl);
+      assert.strictEqual(gone.res.status, 404);
+      assert.strictEqual(gone.res.headers.get('cache-control'), 'no-store');
+      assert.strictEqual((await call('GET', '/api/stats')).json.jobs, statsBefore.jobs);
+    });
+  } finally {
+    await stopServer(child);
+  }
+}
+
 async function main() {
   const out = '';
-  const child = spawn(process.execPath, [path.join(__dirname, '..', 'server', 'index.js')], {
-    env: { ...process.env, PORT: String(PORT), CORS_ORIGINS: 'https://app.example.com' },
-    stdio: ['ignore', 'ignore', 'inherit'],
+  const child = spawnServer(PORT, {
+    CORS_ORIGINS: 'https://app.example.com',
+    CONTEXTFORGE_DB: path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'cf-http-')), 'cf.db'),
   });
   try {
     await waitUp(child, out);
@@ -296,6 +424,8 @@ async function main() {
   } finally {
     child.kill('SIGKILL');
   }
+
+  await persistenceSuite();
 
   console.log(`\nhttp integration: ${passed} passed, ${failed} failed`);
   if (failed) process.exitCode = 1;
