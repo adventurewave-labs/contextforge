@@ -123,6 +123,7 @@ function createStore({ file = defaultDbFile(), shareMax = SHARE_MAX } = {}) {
   function recordJob(job) {
     const forged = Math.max(0, job.originalTokens - job.compressedTokens);
     const v = job.verify || null;
+    const pruneDue = sincePrune + 1 >= PRUNE_EVERY;
     db.exec('BEGIN');
     try {
       if (job.jobId) {
@@ -136,20 +137,19 @@ function createStore({ file = defaultDbFile(), shareMax = SHARE_MAX } = {}) {
       q.bump.run(job.originalTokens, 'tokens_in');
       q.bump.run(job.compressedTokens, 'tokens_out');
       q.bump.run(1, job.method === 'llm' ? 'llm' : 'extractive');
+      // Commit the job, counters, and any due retention cleanup together.
+      if (pruneDue) q.pruneUnshared.run(MAX_UNSHARED_ROWS);
       db.exec('COMMIT');
     } catch (err) {
       db.exec('ROLLBACK');
       throw err;
     }
+    sincePrune = pruneDue ? 0 : sincePrune + 1;
     if (job.jobId && typeof job.compressed === 'string') {
       pending.set(job.jobId, job.compressed.length > SHARE_MAX_CHARS
         ? { tooLarge: true, expires: Date.now() + PENDING_TTL_MS }
         : { compressed: job.compressed, missing: v ? v.missing : [], expires: Date.now() + PENDING_TTL_MS });
       sweepPending();
-    }
-    if (++sincePrune >= PRUNE_EVERY) {
-      sincePrune = 0;
-      q.pruneUnshared.run(MAX_UNSHARED_ROWS);
     }
   }
 
