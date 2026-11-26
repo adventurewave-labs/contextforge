@@ -10,7 +10,9 @@ const { compressContext } = require('./lib/compress');
 const { verifyFaithfulness } = require('./lib/verify');
 const { estimateTokens } = require('./lib/tokens');
 const { catalog } = require('./lib/models');
-const { recordJob, getStats, shareJob, getShare, deleteJob, closeStore, SHARE_MAX_CHARS } = require('./lib/store');
+const { SHARE_MAX_CHARS } = require('./lib/store');
+const { createJobStoreClient } = require('./lib/job-store-worker');
+const jobStore = createJobStoreClient();
 const pkg = require('../package.json');
 
 const PORT = process.env.PORT || 3000;
@@ -342,7 +344,7 @@ async function handleCompress(req, res) {
     fallbackReason: out.fallbackReason || null,
     createdAt: new Date().toISOString(),
   };
-  recordJob({ ...job, engine, model: engine === 'llm' ? model || null : null, verify, compressed: out.compressed });
+  await jobStore.request('recordJobAsync', { ...job, engine, model: engine === 'llm' ? model || null : null, verify, compressed: out.compressed });
 
   send(res, 200, { ...job, compressed: out.compressed, verify, shareable: out.compressed.length <= SHARE_MAX_CHARS });
 }
@@ -353,8 +355,8 @@ const SHARE_ERRORS = {
   too_large: [413, `result exceeds ${SHARE_MAX_CHARS} characters and cannot be shared`],
 };
 
-function handleShare(res, jobId) {
-  const r = shareJob(jobId);
+async function handleShare(res, jobId) {
+  const r = await jobStore.request('shareJob', jobId);
   if (r.error) {
     const [status, error] = SHARE_ERRORS[r.error];
     return send(res, status, { error });
@@ -362,8 +364,8 @@ function handleShare(res, jobId) {
   send(res, 200, { shareId: r.shareId, url: `/r/${r.shareId}`, public: true });
 }
 
-function handleDelete(res, jobId) {
-  if (!deleteJob(jobId)) return send(res, 404, { error: 'job not found' });
+async function handleDelete(res, jobId) {
+  if (!(await jobStore.request('deleteJob', jobId))) return send(res, 404, { error: 'job not found' });
   send(res, 200, { deleted: true });
 }
 
@@ -377,8 +379,8 @@ function scoreClass(score) {
   return 'bad';
 }
 
-function renderShare(res, shareId) {
-  const r = getShare(shareId);
+async function renderShare(res, shareId) {
+  const r = await jobStore.request('getShare', shareId);
   // no-store: a deleted share must not linger in caches; noindex: public-by-URL is not public-by-search.
   const headers = { 'Cache-Control': 'no-store', 'X-Robots-Tag': 'noindex, nofollow', 'Referrer-Policy': 'no-referrer' };
   if (!r) return notFoundPage(res, headers);
@@ -446,7 +448,7 @@ const server = http.createServer(async (req, res) => {
         node: process.version,
         uptime: Math.round(process.uptime()),
         memory: { heapUsedMb: +(mem.heapUsed / 1048576).toFixed(1), rssMb: +(mem.rss / 1048576).toFixed(1) },
-        stats: getStats(),
+        stats: await jobStore.request('getStats'),
       });
     }
     if (url.pathname.startsWith('/api/')) {
@@ -470,12 +472,12 @@ const server = http.createServer(async (req, res) => {
         return send(res, 200, openapi());
       }
       if (url.pathname === '/api/stats' && req.method === 'GET') {
-        return send(res, 200, getStats());
+        return send(res, 200, await jobStore.request('getStats'));
       }
       const jobRoute = /^\/api\/jobs\/([0-9a-f-]{36})(\/share)?$/.exec(url.pathname);
       if (jobRoute) {
-        if (jobRoute[2] && req.method === 'POST') return handleShare(res, jobRoute[1]);
-        if (!jobRoute[2] && req.method === 'DELETE') return handleDelete(res, jobRoute[1]);
+        if (jobRoute[2] && req.method === 'POST') return await handleShare(res, jobRoute[1]);
+        if (!jobRoute[2] && req.method === 'DELETE') return await handleDelete(res, jobRoute[1]);
         return send(res, 405, { error: 'method not allowed' });
       }
       if (req.method !== 'POST') return send(res, 405, { error: 'method not allowed' });
@@ -489,7 +491,7 @@ const server = http.createServer(async (req, res) => {
       return send(res, 405, '<!doctype html><p>method not allowed</p>');
     }
     const shareRoute = /^\/r\/([A-Za-z0-9_-]{22})$/.exec(url.pathname);
-    if (shareRoute) return renderShare(res, shareRoute[1]);
+    if (shareRoute) return await renderShare(res, shareRoute[1]);
     return serveStatic(req, res, url.pathname);
   } catch (err) {
     if (err && err.status) {
@@ -504,8 +506,8 @@ const server = http.createServer(async (req, res) => {
   }
 });
 
-function start() {
-  getStats(); // open the store at boot so a storage fallback is logged before traffic
+async function start() {
+  await jobStore.request('getStats'); // open the store at boot so a storage fallback is logged before traffic
   return new Promise((resolve) => {
     server.listen(PORT, () => {
       console.log(`ContextForge listening on :${PORT}`);
@@ -535,7 +537,7 @@ function shutdown(signal) {
       if (typeof server.closeAllConnections === 'function') server.closeAllConnections();
       resolve();
     }, SHUTDOWN_GRACE_MS).unref();
-  }).then(() => closeStore());
+  }).then(() => jobStore.close());
 }
 
 if (require.main === module) {

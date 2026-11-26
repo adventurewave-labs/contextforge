@@ -23,6 +23,8 @@ const PENDING_TTL_MS = 60 * 60 * 1000;
 const MAX_UNSHARED_ROWS = 10_000; // metadata rows kept for unshared jobs
 const SHARE_MAX = Math.max(1, Number(process.env.SHARE_MAX) || 10_000); // oldest shares expire first
 const PRUNE_EVERY = 100;
+const MAX_WRITE_BATCH = 16;
+const WRITE_BATCH_DELAY_MS = 5;
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS jobs (
@@ -63,40 +65,39 @@ function defaultDbFile() {
   return path.join(__dirname, '..', '..', 'data', 'contextforge.db');
 }
 
-function openDb(file) {
+function openDb(file, requireExisting = false) {
   const { DatabaseSync } = require('node:sqlite');
-  if (file !== ':memory:') fs.mkdirSync(path.dirname(file), { recursive: true });
+  if (file !== ':memory:') {
+    if (requireExisting) fs.statSync(file);
+    else fs.mkdirSync(path.dirname(file), { recursive: true });
+  }
   const db = new DatabaseSync(file);
-  db.exec('PRAGMA busy_timeout = 2000;');
-  db.exec(SCHEMA);
-  return db;
+  try {
+    db.exec('PRAGMA busy_timeout = 2000; PRAGMA synchronous = FULL;');
+    db.exec(SCHEMA);
+    return db;
+  } catch (error) {
+    try { db.close(); } catch (_) { /* preserve the initialization error */ }
+    throw error;
+  }
 }
 
-function createStore({ file = defaultDbFile(), shareMax = SHARE_MAX } = {}) {
-  let db;
-  let storage = 'sqlite';
-  try {
-    db = openDb(file);
-  } catch (err) {
-    // Never silent: log loudly and report storage:'memory' in /api/stats.
-    console.error(JSON.stringify({
-      ts: new Date().toISOString(), msg: 'store', level: 'warn',
-      note: `cannot open SQLite at ${file} (${err.message}); falling back to in-memory — stats and shares will not survive a restart`,
-    }));
-    db = openDb(':memory:');
-    storage = 'memory';
-  }
-  if (file === ':memory:') storage = 'memory';
-
+function seedStore(db) {
   db.prepare('INSERT OR IGNORE INTO meta (key, value) VALUES (?, ?)').run('started_at', new Date().toISOString());
   const seed = db.prepare('INSERT OR IGNORE INTO counters (key, value) VALUES (?, 0)');
   for (const k of COUNTERS) seed.run(k);
+}
 
-  const q = {
+function prepareStatements(db) {
+  return {
     insert: db.prepare(`INSERT INTO jobs (id, created_at, engine, model, method, original_tokens,
       compressed_tokens, ratio, compression, elapsed_ms, verify_score, facts_total, facts_kept,
       missing_count, est_savings_usd) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`),
-    bump: db.prepare('UPDATE counters SET value = value + ? WHERE key = ?'),
+    saveJob: db.prepare('SAVEPOINT record_job'),
+    releaseJob: db.prepare('RELEASE record_job'),
+    bump: db.prepare(`UPDATE counters SET value = value + CASE key
+      WHEN 'jobs' THEN 1 WHEN 'tokens_in' THEN ? WHEN 'tokens_out' THEN ? ELSE 1 END
+      WHERE key IN ('jobs', 'tokens_in', 'tokens_out', ?)`),
     counters: db.prepare('SELECT key, value FROM counters'),
     startedAt: db.prepare("SELECT value FROM meta WHERE key = 'started_at'"),
     byId: db.prepare('SELECT id, share_id FROM jobs WHERE id = ?'),
@@ -109,10 +110,35 @@ function createStore({ file = defaultDbFile(), shareMax = SHARE_MAX } = {}) {
     pruneShares: db.prepare(`DELETE FROM jobs WHERE share_id IS NOT NULL AND id NOT IN
       (SELECT id FROM jobs WHERE share_id IS NOT NULL ORDER BY share_seq DESC LIMIT ?)`),
   };
+}
+
+function createStore({ file = defaultDbFile(), shareMax = SHARE_MAX, allowMemoryFallback = true } = {}) {
+  let db;
+  let storage = 'sqlite';
+  try {
+    db = openDb(file, !allowMemoryFallback);
+  } catch (err) {
+    if (!allowMemoryFallback) throw err;
+    // Never silent: log loudly and report storage:'memory' in /api/stats.
+    console.error(JSON.stringify({
+      ts: new Date().toISOString(), msg: 'store', level: 'warn',
+      note: `cannot open SQLite at ${file} (${err.message}); falling back to in-memory — stats and shares will not survive a restart`,
+    }));
+    db = openDb(':memory:');
+    storage = 'memory';
+  }
+  if (file === ':memory:') storage = 'memory';
+
+  seedStore(db);
+  let q = prepareStatements(db);
 
   // jobId -> { compressed, missing, expires } | { tooLarge: true, expires }
   const pending = new Map();
   let sincePrune = 0;
+  const queuedJobs = [];
+  let flushTimer = null;
+  let reopenRequired = false;
+  let closed = false;
 
   function sweepPending() {
     const now = Date.now();
@@ -120,37 +146,126 @@ function createStore({ file = defaultDbFile(), shareMax = SHARE_MAX } = {}) {
     while (pending.size > PENDING_MAX) pending.delete(pending.keys().next().value);
   }
 
-  function recordJob(job) {
+  function writeJob(job, pruneDue) {
     const forged = Math.max(0, job.originalTokens - job.compressedTokens);
     const v = job.verify || null;
-    const pruneDue = sincePrune + 1 >= PRUNE_EVERY;
+    if (job.jobId) {
+      q.insert.run(job.jobId, job.createdAt || new Date().toISOString(), job.engine || job.method,
+        job.model || null, job.method, job.originalTokens, job.compressedTokens,
+        job.ratio ?? 0, job.compression ?? 0, job.elapsedMs ?? 0,
+        v ? v.score : null, v ? v.factsTotal : null, v ? v.factsKept : null,
+        v ? v.missing.length : null, +(forged / 1e6 * PRICE_PER_M).toFixed(6));
+    }
+    q.bump.run(job.originalTokens, job.compressedTokens, job.method === 'llm' ? 'llm' : 'extractive');
+    if (pruneDue) q.pruneUnshared.run(MAX_UNSHARED_ROWS);
+
+    if (!job.jobId || typeof job.compressed !== 'string') return null;
+    return job.compressed.length > SHARE_MAX_CHARS
+      ? { tooLarge: true }
+      : { compressed: job.compressed, missing: v ? v.missing : [] };
+  }
+
+  function checkStore() {
+    if (closed) throw new Error('The job store is closed');
+    if (!reopenRequired) return;
+
+    // Reopen the original backing store without the startup memory fallback.
+    // Keep pending results that were published by earlier successful writes.
+    if (storage === 'memory') {
+      db.exec('ROLLBACK');
+    } else {
+      db?.close();
+      db = null;
+      db = openDb(file, true);
+      q = prepareStatements(db);
+    }
+    reopenRequired = false;
+  }
+
+  function commitJobs(jobs) {
+    checkStore();
+    let nextSincePrune = sincePrune;
+    const results = [];
+    let committing = false;
     db.exec('BEGIN');
     try {
-      if (job.jobId) {
-        q.insert.run(job.jobId, job.createdAt || new Date().toISOString(), job.engine || job.method,
-          job.model || null, job.method, job.originalTokens, job.compressedTokens,
-          job.ratio ?? 0, job.compression ?? 0, job.elapsedMs ?? 0,
-          v ? v.score : null, v ? v.factsTotal : null, v ? v.factsKept : null,
-          v ? v.missing.length : null, +(forged / 1e6 * PRICE_PER_M).toFixed(6));
+      for (const job of jobs) {
+        q.saveJob.run();
+        const pruneDue = nextSincePrune + 1 >= PRUNE_EVERY;
+        let payload;
+        try {
+          payload = writeJob(job, pruneDue);
+        } catch (error) {
+          try {
+            db.exec('ROLLBACK TO record_job; RELEASE record_job');
+          } catch (_) {
+            // SQLite may have already rolled back the entire transaction.
+            throw error;
+          }
+          results.push({ error });
+          continue;
+        }
+        q.releaseJob.run();
+        results.push({ id: job.jobId, payload });
+        nextSincePrune = pruneDue ? 0 : nextSincePrune + 1;
       }
-      q.bump.run(1, 'jobs');
-      q.bump.run(job.originalTokens, 'tokens_in');
-      q.bump.run(job.compressedTokens, 'tokens_out');
-      q.bump.run(1, job.method === 'llm' ? 'llm' : 'extractive');
-      // Commit the job, counters, and any due retention cleanup together.
-      if (pruneDue) q.pruneUnshared.run(MAX_UNSHARED_ROWS);
+      committing = true;
       db.exec('COMMIT');
-    } catch (err) {
-      db.exec('ROLLBACK');
-      throw err;
+    } catch (error) {
+      try {
+        db.exec('ROLLBACK');
+      } catch (rollbackError) {
+        // Node 22.13 does not expose isTransaction. SQLite's ROLLBACK error
+        // identifies the same already-ended transaction on that version.
+        const stillInTransaction = db.isTransaction ?? !(rollbackError.errcode === 1 &&
+          rollbackError.message === 'cannot rollback - no transaction is active');
+        reopenRequired = stillInTransaction || (committing && storage === 'sqlite');
+      }
+      throw error;
     }
-    sincePrune = pruneDue ? 0 : sincePrune + 1;
-    if (job.jobId && typeof job.compressed === 'string') {
-      pending.set(job.jobId, job.compressed.length > SHARE_MAX_CHARS
-        ? { tooLarge: true, expires: Date.now() + PENDING_TTL_MS }
-        : { compressed: job.compressed, missing: v ? v.missing : [], expires: Date.now() + PENDING_TTL_MS });
-      sweepPending();
+
+    sincePrune = nextSincePrune;
+    for (const { id, payload } of results) {
+      if (!payload) continue;
+      pending.set(id, { ...payload, expires: Date.now() + PENDING_TTL_MS });
     }
+    sweepPending();
+    return results;
+  }
+
+  function flushJobWrites() {
+    clearTimeout(flushTimer);
+    flushTimer = null;
+    const batch = queuedJobs.splice(0);
+    if (!batch.length) return;
+
+    let results;
+    try {
+      results = commitJobs(batch.map(({ job }) => job));
+    } catch (error) {
+      for (const { reject } of batch) reject(error);
+      return;
+    }
+    batch.forEach(({ resolve, reject }, index) => {
+      const { error } = results[index];
+      if (error) reject(error);
+      else resolve();
+    });
+  }
+
+  function recordJob(job) {
+    flushJobWrites();
+    const [{ error }] = commitJobs([job]);
+    if (error) throw error;
+  }
+
+  function recordJobAsync(job) {
+    return new Promise((resolve, reject) => {
+      checkStore();
+      queuedJobs.push({ job, resolve, reject });
+      if (queuedJobs.length === MAX_WRITE_BATCH) flushJobWrites();
+      else if (flushTimer === null) flushTimer = setTimeout(flushJobWrites, WRITE_BATCH_DELAY_MS);
+    });
   }
 
   // -> { shareId } | { error: 'not_found' | 'expired' | 'too_large' }
@@ -158,6 +273,7 @@ function createStore({ file = defaultDbFile(), shareMax = SHARE_MAX } = {}) {
   // process on the same file can't interleave; a failed prune rolls the share
   // back and the result stays pending, so no link exists that nobody was given.
   function shareJob(jobId) {
+    checkStore();
     sweepPending();
     db.exec('BEGIN IMMEDIATE');
     let result;
@@ -187,6 +303,7 @@ function createStore({ file = defaultDbFile(), shareMax = SHARE_MAX } = {}) {
   }
 
   function getShare(shareId) {
+    checkStore();
     const r = q.byShare.get(shareId);
     if (!r) return null;
     return {
@@ -209,11 +326,13 @@ function createStore({ file = defaultDbFile(), shareMax = SHARE_MAX } = {}) {
   }
 
   function deleteJob(jobId) {
+    checkStore();
     pending.delete(jobId);
     return Number(q.del.run(jobId).changes) > 0;
   }
 
   function getStats() {
+    checkStore();
     const c = Object.fromEntries(q.counters.all().map((r) => [r.key, Number(r.value)]));
     const forged = Math.max(0, c.tokens_in - c.tokens_out);
     return {
@@ -229,10 +348,13 @@ function createStore({ file = defaultDbFile(), shareMax = SHARE_MAX } = {}) {
   }
 
   function close() {
-    try { db.close(); } catch (_) { /* already closed */ }
+    if (closed) return;
+    flushJobWrites();
+    closed = true;
+    try { db?.close(); } catch (_) { /* shutdown must continue */ }
   }
 
-  return { recordJob, shareJob, getShare, deleteJob, getStats, close, storage };
+  return { recordJob, recordJobAsync, shareJob, getShare, deleteJob, getStats, close, storage };
 }
 
 // Process-wide store, opened lazily so tests can set CONTEXTFORGE_DB first.
@@ -245,6 +367,7 @@ function store() {
 module.exports = {
   createStore,
   recordJob: (job) => store().recordJob(job),
+  recordJobAsync: (job) => store().recordJobAsync(job),
   shareJob: (id) => store().shareJob(id),
   getShare: (id) => store().getShare(id),
   deleteJob: (id) => store().deleteJob(id),
