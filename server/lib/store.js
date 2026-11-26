@@ -43,6 +43,7 @@ CREATE TABLE IF NOT EXISTS jobs (
   est_savings_usd REAL NOT NULL,
   share_id TEXT UNIQUE,
   shared_at TEXT,
+  share_seq INTEGER UNIQUE, -- monotonic share order: pruning never ties on a timestamp
   compressed TEXT,
   missing_json TEXT
 );
@@ -71,7 +72,7 @@ function openDb(file) {
   return db;
 }
 
-function createStore({ file = defaultDbFile() } = {}) {
+function createStore({ file = defaultDbFile(), shareMax = SHARE_MAX } = {}) {
   let db;
   let storage = 'sqlite';
   try {
@@ -99,13 +100,14 @@ function createStore({ file = defaultDbFile() } = {}) {
     counters: db.prepare('SELECT key, value FROM counters'),
     startedAt: db.prepare("SELECT value FROM meta WHERE key = 'started_at'"),
     byId: db.prepare('SELECT id, share_id FROM jobs WHERE id = ?'),
-    share: db.prepare('UPDATE jobs SET share_id = ?, shared_at = ?, compressed = ?, missing_json = ? WHERE id = ? AND share_id IS NULL'),
+    share: db.prepare(`UPDATE jobs SET share_id = ?, shared_at = ?, compressed = ?, missing_json = ?,
+      share_seq = (SELECT COALESCE(MAX(share_seq), 0) + 1 FROM jobs) WHERE id = ? AND share_id IS NULL`),
     byShare: db.prepare('SELECT * FROM jobs WHERE share_id = ?'),
     del: db.prepare('DELETE FROM jobs WHERE id = ?'),
     pruneUnshared: db.prepare(`DELETE FROM jobs WHERE share_id IS NULL AND id NOT IN
-      (SELECT id FROM jobs WHERE share_id IS NULL ORDER BY created_at DESC LIMIT ?)`),
+      (SELECT id FROM jobs WHERE share_id IS NULL ORDER BY created_at DESC, rowid DESC LIMIT ?)`),
     pruneShares: db.prepare(`DELETE FROM jobs WHERE share_id IS NOT NULL AND id NOT IN
-      (SELECT id FROM jobs WHERE share_id IS NOT NULL ORDER BY shared_at DESC LIMIT ?)`),
+      (SELECT id FROM jobs WHERE share_id IS NOT NULL ORDER BY share_seq DESC LIMIT ?)`),
   };
 
   // jobId -> { compressed, missing, expires } | { tooLarge: true, expires }
@@ -163,7 +165,7 @@ function createStore({ file = defaultDbFile() } = {}) {
     const shareId = crypto.randomBytes(16).toString('base64url');
     q.share.run(shareId, new Date().toISOString(), p.compressed, JSON.stringify(p.missing), jobId);
     pending.delete(jobId);
-    q.pruneShares.run(SHARE_MAX);
+    q.pruneShares.run(shareMax);
     return { shareId };
   }
 

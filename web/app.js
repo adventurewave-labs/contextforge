@@ -130,33 +130,39 @@ function resetShare(job) {
 }
 
 async function share() {
-  if (!currentJob) return;
+  const job = currentJob;
+  if (!job) return;
   $('share').disabled = true;
   try {
-    const res = await fetch(`/api/jobs/${currentJob.jobId}/share`, { method: 'POST' });
+    const res = await fetch(`/api/jobs/${job.jobId}/share`, { method: 'POST' });
     const body = await res.json();
+    if (currentJob !== job) return; // a newer forge replaced this result mid-flight
     if (!res.ok) throw new Error(body.error || res.status);
     $('shareUrl').value = new URL(body.url, location.origin).href;
     $('shareOut').classList.remove('hidden');
     $('shareStatus').textContent = 'Link created — anyone with this URL can view it. Delete the job to revoke it.';
   } catch (err) {
+    if (currentJob !== job) return;
     $('share').disabled = false;
     $('shareStatus').textContent = 'Share failed: ' + err.message;
   }
 }
 
 async function del() {
-  if (!currentJob) return;
+  const job = currentJob;
+  if (!job) return;
   if (!confirm('Delete this job? Any share link stops working immediately.')) return;
   try {
-    const res = await fetch(`/api/jobs/${currentJob.jobId}`, { method: 'DELETE' });
+    const res = await fetch(`/api/jobs/${job.jobId}`, { method: 'DELETE' });
     if (!res.ok && res.status !== 404) throw new Error((await res.json()).error || res.status);
+    if (currentJob !== job) return; // the deleted job is no longer on screen
     currentJob = null;
     $('share').disabled = true;
     $('delete').disabled = true;
     $('shareOut').classList.add('hidden');
     $('shareStatus').textContent = 'Job deleted. The share link (if any) now returns 404.';
   } catch (err) {
+    if (currentJob !== job) return;
     $('shareStatus').textContent = 'Delete failed: ' + err.message;
   }
 }

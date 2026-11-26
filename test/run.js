@@ -234,6 +234,19 @@ ok('unshared content is never written to disk; restart means re-run to share', (
   assert.strictEqual(s2.shareJob(UUID()).error, 'not_found');
   s2.close();
 });
+ok('share cap expires oldest first and never the share just created', () => {
+  const s = createStore({ file: ':memory:', shareMax: 2 });
+  const ids = [];
+  for (let i = 0; i < 5; i++) { // same-millisecond shares: ordering must not tie
+    const job = sampleJob();
+    s.recordJob(job);
+    const { shareId } = s.shareJob(job.jobId);
+    assert.ok(s.getShare(shareId), `share ${i} pruned on creation`);
+    ids.push(shareId);
+  }
+  assert.deepStrictEqual(ids.map((id) => !!s.getShare(id)), [false, false, false, true, true]);
+  s.close();
+});
 ok('oversized results are refused for sharing', () => {
   const s = createStore({ file: ':memory:' });
   const job = sampleJob({ compressed: 'x'.repeat(SHARE_MAX_CHARS + 1) });
