@@ -10,7 +10,7 @@ const { compressContext } = require('./lib/compress');
 const { verifyFaithfulness } = require('./lib/verify');
 const { estimateTokens } = require('./lib/tokens');
 const { catalog } = require('./lib/models');
-const { recordJob, getStats, shareJob, getShare, deleteJob, closeStore, SHARE_MAX_CHARS } = require('./lib/store');
+const { recordJobAsync, getStats, shareJob, getShare, deleteJob, closeStore, SHARE_MAX_CHARS } = require('./lib/store');
 const pkg = require('../package.json');
 
 const PORT = process.env.PORT || 3000;
@@ -342,7 +342,7 @@ async function handleCompress(req, res) {
     fallbackReason: out.fallbackReason || null,
     createdAt: new Date().toISOString(),
   };
-  recordJob({ ...job, engine, model: engine === 'llm' ? model || null : null, verify, compressed: out.compressed });
+  await recordJobAsync({ ...job, engine, model: engine === 'llm' ? model || null : null, verify, compressed: out.compressed });
 
   send(res, 200, { ...job, compressed: out.compressed, verify, shareable: out.compressed.length <= SHARE_MAX_CHARS });
 }

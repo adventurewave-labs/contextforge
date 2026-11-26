@@ -195,6 +195,183 @@ function sampleJob(over) {
     compressed: 'Acme revenue grew.', ...over,
   };
 }
+ok('batched jobs commit together while a failed job leaves no changes', async () => {
+  const s = createStore({ file: ':memory:' });
+  try {
+    const first = sampleJob();
+    const after = sampleJob();
+    const batch = Promise.allSettled([
+      s.recordJobAsync(first),
+      s.recordJobAsync(first),
+      s.recordJobAsync(after),
+    ]);
+    assert.strictEqual(s.getStats().jobs, 0);
+    assert.deepStrictEqual(s.shareJob(first.jobId), { error: 'not_found' });
+    const [a, duplicate, b] = await batch;
+    assert.strictEqual(a.status, 'fulfilled');
+    assert.strictEqual(duplicate.status, 'rejected');
+    assert.match(duplicate.reason.message, /UNIQUE constraint failed/);
+    assert.strictEqual(b.status, 'fulfilled');
+    assert.strictEqual(s.getStats().jobs, 2);
+    assert.strictEqual(s.getStats().tokensIn, first.originalTokens + after.originalTokens);
+    assert.ok(s.shareJob(first.jobId).shareId);
+    assert.ok(s.shareJob(after.jobId).shareId);
+  } finally {
+    s.close();
+  }
+});
+
+ok('automatic transaction rollback rejects the batch with the original error', async () => {
+  const { DatabaseSync } = require('node:sqlite');
+  const file = tmpDb();
+  const s = createStore({ file });
+  const raw = new DatabaseSync(file);
+  const first = sampleJob();
+  try {
+    raw.exec(
+      "CREATE TRIGGER cancel_batch BEFORE INSERT ON jobs WHEN NEW.model = 'cancel' " +
+      "BEGIN SELECT RAISE(ROLLBACK, 'batch cancelled'); END",
+    );
+    const outcomes = await Promise.allSettled([
+      s.recordJobAsync(first), s.recordJobAsync(sampleJob({ model: 'cancel' })),
+    ]);
+    for (const outcome of outcomes) {
+      assert.strictEqual(outcome.status, 'rejected');
+      assert.match(outcome.reason.message, /^batch cancelled$/);
+    }
+    assert.strictEqual(s.getStats().jobs, 0);
+    assert.strictEqual(raw.prepare('SELECT COUNT(*) AS n FROM jobs').get().n, 0);
+    await s.recordJobAsync(first);
+    assert.strictEqual(s.getStats().jobs, 1);
+  } finally {
+    raw.close();
+    s.close();
+  }
+});
+
+ok('failed commit is rolled back before the next batch can succeed', async () => {
+  const { DatabaseSync } = require('node:sqlite');
+  const file = tmpDb();
+  const s = createStore({ file });
+  const raw = new DatabaseSync(file);
+  const first = sampleJob();
+  try {
+    raw.exec(
+      'CREATE TABLE parent (id TEXT PRIMARY KEY); ' +
+      'CREATE TABLE child (parent_id TEXT REFERENCES parent(id) DEFERRABLE INITIALLY DEFERRED); ' +
+      "CREATE TRIGGER defer_failure AFTER INSERT ON jobs WHEN NEW.model = 'deferred' " +
+      "BEGIN INSERT INTO child VALUES ('absent'); END",
+    );
+    const outcomes = await Promise.allSettled([
+      s.recordJobAsync(first), s.recordJobAsync(sampleJob({ model: 'deferred' })),
+    ]);
+    for (const outcome of outcomes) {
+      assert.strictEqual(outcome.status, 'rejected');
+      assert.match(outcome.reason.message, /FOREIGN KEY constraint failed/);
+    }
+
+    assert.strictEqual(s.getStats().jobs, 0);
+    assert.deepStrictEqual(s.shareJob(first.jobId), { error: 'not_found' });
+    await s.recordJobAsync(sampleJob());
+    assert.strictEqual(s.getStats().jobs, 1);
+    assert.strictEqual(raw.prepare('SELECT COUNT(*) AS n FROM jobs').get().n, 1);
+    assert.deepStrictEqual(s.shareJob(first.jobId), { error: 'not_found' });
+  } finally {
+    raw.close();
+    s.close();
+  }
+});
+
+ok('store recovers from a commit with an unknown outcome without retrying it', () => {
+  const { DatabaseSync } = require('node:sqlite');
+  const { mock } = require('node:test');
+  const s = createStore({ file: tmpDb() });
+  const exec = DatabaseSync.prototype.exec;
+  const prior = sampleJob();
+  const ambiguous = sampleJob();
+  try {
+    s.recordJob(prior);
+    const fault = mock.method(DatabaseSync.prototype, 'exec', function (sql) {
+      exec.call(this, sql);
+      if (sql === 'COMMIT') throw new Error('commit acknowledgement lost');
+    });
+    try {
+      assert.throws(() => s.recordJob(ambiguous), /commit acknowledgement lost/);
+    } finally {
+      fault.mock.restore();
+    }
+
+    assert.strictEqual(s.getStats().jobs, 2);
+    assert.deepStrictEqual(s.shareJob(ambiguous.jobId), { error: 'expired' });
+    assert.ok(s.shareJob(prior.jobId).shareId);
+    s.recordJob(sampleJob());
+    assert.strictEqual(s.getStats().jobs, 3);
+  } finally {
+    s.close();
+  }
+});
+
+ok('a synchronous write records queued jobs first', async () => {
+  const s = createStore({ file: ':memory:' });
+  try {
+    const job = sampleJob();
+    const queued = s.recordJobAsync(job);
+    assert.throws(() => s.recordJob(job), /UNIQUE constraint failed/);
+    await queued;
+    assert.strictEqual(s.getStats().jobs, 1);
+  } finally {
+    s.close();
+  }
+});
+
+ok('close drains queued writes and rejects new work', async () => {
+  const file = tmpDb();
+  const s = createStore({ file });
+  const queued = s.recordJobAsync(sampleJob());
+  s.close();
+  try {
+    await queued;
+    await assert.rejects(s.recordJobAsync(sampleJob()), /closed/);
+    assert.throws(() => s.recordJob(sampleJob()), /closed/);
+    const reopened = createStore({ file });
+    try {
+      assert.strictEqual(reopened.getStats().jobs, 1);
+    } finally {
+      reopened.close();
+    }
+  } finally {
+    s.close();
+  }
+});
+
+ok('a failed close drain rejects queued jobs and the store can be reopened', async () => {
+  const { DatabaseSync } = require('node:sqlite');
+  const file = tmpDb();
+  const s = createStore({ file });
+  const raw = new DatabaseSync(file);
+  try {
+    raw.exec(
+      'CREATE TRIGGER cancel_close BEFORE INSERT ON jobs ' +
+      "BEGIN SELECT RAISE(ROLLBACK, 'drain cancelled'); END",
+    );
+    const queued = s.recordJobAsync(sampleJob());
+    const rejection = assert.rejects(queued, /drain cancelled/);
+    s.close();
+    await rejection;
+    raw.exec('DROP TRIGGER cancel_close');
+    const reopened = createStore({ file });
+    try {
+      await reopened.recordJobAsync(sampleJob());
+      assert.strictEqual(reopened.getStats().jobs, 1);
+    } finally {
+      reopened.close();
+    }
+  } finally {
+    raw.close();
+    s.close();
+  }
+});
+
 ok('share round-trips compressed text, metrics and missing facts', () => {
   const s = createStore({ file: ':memory:' });
   const job = sampleJob();

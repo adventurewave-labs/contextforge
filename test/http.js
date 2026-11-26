@@ -60,11 +60,11 @@ function spawnServer(port, extraEnv) {
   });
 }
 
-function stopServer(child) {
+function stopServer(child, signal = 'SIGTERM') {
   return new Promise((resolve) => {
-    if (child.exitCode !== null) return resolve();
+    if (child.exitCode !== null || child.signalCode !== null) return resolve();
     child.once('exit', () => resolve());
-    child.kill('SIGTERM');
+    child.kill(signal);
   });
 }
 
@@ -113,10 +113,22 @@ async function persistenceSuite() {
       assert.strictEqual(json.shareable, true);
       job = json;
     });
+    await ok('concurrent compression acknowledges eight durable jobs', async () => {
+      const results = await Promise.all(Array.from({ length: 8 }, () =>
+        call('POST', '/api/compress', {
+          context: 'The project renewal is confirmed for 2026-11-01 and the price is $18.4 million.',
+          targetRatio: 0.9,
+        })));
+      for (const { res, json } of results) {
+        assert.strictEqual(res.status, 200);
+        assert.ok(json.jobId);
+      }
+      assert.strictEqual(new Set(results.map(({ json }) => json.jobId)).size, 8);
+    });
     await ok('stats report sqlite storage', async () => {
       const { json } = await call('GET', '/api/stats');
       assert.strictEqual(json.storage, 'sqlite');
-      assert.ok(json.jobs >= 1);
+      assert.strictEqual(json.jobs, 9);
       statsBefore = json;
     });
     await ok('POST /api/jobs/:id/share returns a public /r/ link', async () => {
@@ -148,20 +160,20 @@ async function persistenceSuite() {
       assert.strictEqual((await call('GET', '/r/not-a-share-id')).res.status, 404);
     });
   } finally {
-    await stopServer(child);
+    await stopServer(child, 'SIGKILL');
   }
 
   child = spawnServer(port, { CONTEXTFORGE_DB: db });
   try {
     await up(child);
-    await ok('restart: lifetime stats intact', async () => {
+    await ok('SIGKILL and reopen: lifetime stats intact', async () => {
       const { json } = await call('GET', '/api/stats');
       assert.ok(statsBefore, 'no baseline stats');
       for (const k of ['jobs', 'tokensIn', 'tokensOut', 'tokensForged', 'estSavingsUsd', 'startedAt']) {
         assert.deepStrictEqual(json[k], statsBefore[k], `${k} changed across restart`);
       }
     });
-    await ok('restart: share link still renders without a re-run', async () => {
+    await ok('SIGKILL and reopen: share link still renders without a re-run', async () => {
       const { res } = await call('GET', shareUrl);
       assert.strictEqual(res.status, 200);
     });
