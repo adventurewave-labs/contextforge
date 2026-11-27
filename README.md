@@ -259,7 +259,7 @@ snapshot from the OpenRouter catalog (2026-10-12).
 |---|---|---|
 | `PORT` | `3000` | Listen port (Railway injects this) |
 | `OPENROUTER_API_KEY` | – | Enables the LLM compression engine; absent = extractive only, LLM requests fall back with `fallbackReason` |
-| `RATE_LIMIT_MAX` | `40` | Requests/min/IP (hard-capped at 10,000) |
+| `RATE_LIMIT_MAX` | `40` | Requests per minute, hard-capped at 10,000. Existing API routes limit per IP. The chat proxy shares one bucket across authorized requests per process and limits rejected credentials by socket peer. |
 | `CORS_ORIGINS` | – | Comma-separated strict allowlist, e.g. `https://app.example.com`; unset = no CORS headers |
 | `SHUTDOWN_GRACE_MS` | `10000` | SIGTERM drain window before forced close |
 | `CONTEXTFORGE_DB` | `$RAILWAY_VOLUME_MOUNT_PATH/contextforge.db`, else `./data/contextforge.db` | SQLite file for stats + shares; `:memory:` for ephemeral |
