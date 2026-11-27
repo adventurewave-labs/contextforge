@@ -12,7 +12,7 @@ const { estimateTokens } = require('./lib/tokens');
 const { catalog } = require('./lib/models');
 const { SHARE_MAX_CHARS } = require('./lib/store');
 const { createJobStoreClient } = require('./lib/job-store-worker');
-const jobStore = createJobStoreClient();
+const { CHAT_PATH, createChatProxy } = require('./lib/chat-proxy');
 const pkg = require('../package.json');
 
 const PORT = process.env.PORT || 3000;
@@ -99,6 +99,10 @@ function logAccess(reqId, req, res, pathname, startedAt) {
     ms,
     bytes: Number(res.getHeader('content-length')) || 0,
   };
+  const upstreamId = pathname === CHAT_PATH && res.getHeader('x-request-id');
+  if (typeof upstreamId === 'string' && upstreamId !== reqId && INBOUND_REQ_ID_RE.test(upstreamId)) {
+    entry.upstreamReqId = upstreamId;
+  }
   console.log(JSON.stringify(entry));
 }
 
@@ -427,19 +431,33 @@ async function handleVerify(req, res) {
 }
 
 // --- router ---
+const proxyRateKey = Symbol('chat-proxy');
+const chatProxy = createChatProxy(process.env, {
+  maxBody: MAX_BODY,
+  checkRate: (req, authorized) => checkRate(authorized
+    ? proxyRateKey : 'chat-proxy-denied:' + req.socket.remoteAddress),
+  send,
+});
+const jobStore = createJobStoreClient();
 const server = http.createServer(async (req, res) => {
-  const reqId = requestId(req);
   const startedAt = process.hrtime.bigint();
-  let pathname = req.url;
+  let url;
+  try { url = new URL(req.url, 'http://localhost'); } catch {
+    return send(res, 400, { error: 'invalid request target' }, { Connection: 'close' });
+  }
+  const pathname = url.pathname;
+  const reqId = pathname === CHAT_PATH ? crypto.randomUUID() : requestId(req);
   res.setHeader('X-Request-ID', reqId);
   // 'close' fires for both completed and aborted responses.
   res.on('close', () => logAccess(reqId, req, res, pathname, startedAt));
 
-  const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
-  pathname = url.pathname;
   const ip = (req.headers['x-forwarded-for'] || req.socket.remoteAddress || '?').split(',')[0].trim();
 
   try {
+    if (pathname === CHAT_PATH) {
+      for (const [name, value] of Object.entries(SECURITY_HEADERS)) res.setHeader(name, value);
+      return await chatProxy(req, res);
+    }
     if (url.pathname === '/health' || url.pathname === '/api/health') {
       const mem = process.memoryUsage();
       return send(res, 200, {

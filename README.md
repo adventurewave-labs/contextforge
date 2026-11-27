@@ -130,6 +130,12 @@ railway init && railway up
 - `instructions`: free-text "must keep" hints — sentences matching ≥2 of your
   keywords get pinned.
 
+### `POST /v1/chat/completions`
+
+Compatibility-first forwarding for the stock OpenAI SDKs. Set the client's base URL to `https://<contextforge-host>/v1` and use the deployment's proxy client key. The deployment sends the original JSON to one configured OpenAI-compatible HTTPS endpoint using a separate upstream key. Streaming responses preserve the upstream SSE bytes, usage events, and termination. HTTP errors and rate-limit metadata are relayed where supplied. Authorization, request size, and upstream time are bounded at the proxy.
+
+Enable this endpoint by setting all three `CONTEXTFORGE_PROXY_*` URL and key variables below. Store keys through the deployment's secret mechanism. The proxy records request correlation, route, status, and latency. Its upstream header allowlist preserves content metadata, rate-limit information, and request IDs. The compatibility endpoint forwards inputs as received. Evaluate inline compression and verification as a later feature.
+
 ### `POST /api/verify`
 
 ```json
@@ -206,8 +212,16 @@ unless you enable the LLM engine.
 ## Tests
 
 ```bash
-npm test    # 37 unit tests + 40 HTTP integration checks, zero dependencies
+npm test    # unit and HTTP integration checks, zero dependencies
 ```
+
+Run the proxy integration suite with OpenSSL available. It uses an ephemeral TLS upstream and synthetic credentials.
+
+```sh
+npm run test:proxy
+```
+
+For the stock SDK checks, make the official Node `openai` package resolvable and the official Python `openai` package available to `python3` (or set `CONTEXTFORGE_TEST_PYTHON`). Run `CONTEXTFORGE_TEST_SDKS=1 npm run test:proxy`. The SDK packages are test-only. The server has no npm dependencies.
 
 ---
 
@@ -216,7 +230,8 @@ npm test    # 37 unit tests + 40 HTTP integration checks, zero dependencies
 - [x] SQLite persistence + shareable result links (v1.1)
 - [ ] Token-level LLMLingua-style compression behind the same API
 - [ ] Team savings ledgers + CSV export
-- [ ] Drop-in OpenAI-compatible proxy that forges context transparently
+- [x] OpenAI-compatible chat pass-through proxy
+- [ ] Verified compression on the OpenAI-compatible proxy
 
 ## License
 
@@ -244,16 +259,21 @@ snapshot from the OpenRouter catalog (2026-10-12).
 |---|---|---|
 | `PORT` | `3000` | Listen port (Railway injects this) |
 | `OPENROUTER_API_KEY` | – | Enables the LLM compression engine; absent = extractive only, LLM requests fall back with `fallbackReason` |
-| `RATE_LIMIT_MAX` | `40` | Requests/min/IP (hard-capped at 10,000) |
+| `RATE_LIMIT_MAX` | `40` | Requests per minute, hard-capped at 10,000. Existing API routes limit per IP. The chat proxy shares one bucket across authorized requests per process and limits rejected credentials by socket peer. |
 | `CORS_ORIGINS` | – | Comma-separated strict allowlist, e.g. `https://app.example.com`; unset = no CORS headers |
 | `SHUTDOWN_GRACE_MS` | `10000` | SIGTERM drain window before forced close |
 | `CONTEXTFORGE_DB` | `$RAILWAY_VOLUME_MOUNT_PATH/contextforge.db`, else `./data/contextforge.db` | SQLite file for stats + shares; `:memory:` for ephemeral |
 | `SHARE_MAX` | `10000` | Max live share links; beyond it the oldest expire first |
+| `CONTEXTFORGE_PROXY_UPSTREAM_URL` | – | Complete HTTPS Chat Completions URL, such as `https://api.openai.com/v1/chat/completions` |
+| `CONTEXTFORGE_PROXY_UPSTREAM_KEY` | – | Bearer key sent only to the configured upstream |
+| `CONTEXTFORGE_PROXY_CLIENT_KEY` | – | Distinct bearer key required from chat proxy clients |
+| `CONTEXTFORGE_PROXY_TIMEOUT_MS` | `60000` | Total upstream deadline in milliseconds, including streamed responses |
+
 
 ### Health & monitoring
 
 - `GET /health` → `ok`, `version`, `node`, `uptime`, `memory.{heapUsedMb,rssMb}`, lifetime `stats`. Wire this to your uptime checker.
-- Logs are JSON lines: access entries carry `reqId`, `method`, `path`, `status`, `ms`, `bytes`; shutdown logs `{"msg":"shutdown"}`. `X-Request-ID` is echoed from inbound headers when well-formed for trace correlation.
+- Logs are JSON lines: access entries carry `reqId`, `method`, `path`, `status`, `ms`, `bytes`; shutdown logs `{"msg":"shutdown"}`. `X-Request-ID` is echoed from inbound headers when well-formed for trace correlation on the existing endpoints. Chat proxy requests have a generated ID and record a validated upstream ID when provided.
 - Load reference (single replica, local): 303 req/s, p95 152.7ms — see `docs/benchmark.md`.
 
 ### Rollback
